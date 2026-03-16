@@ -1,0 +1,73 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Conda environment
+conda/
+env/
+envs/
+
+# Virtual environments
+venv/
+.env/
+env.bak/
+venv.bak/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+Thumbs.db
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+
+# Logs
+logs/
+*.log
+
+# Data
+data/
+datasets/
+*.csv
+*.h5
+*.hdf5
+
+# Models
+models/
+*.pth
+*.pt
+*.ckpt
+*.bin
+
+# Configuration
+config.ini
+config.json
+.env
+*.env
+
+# Build
+build/
+dist/
+*.egg-info/
+
+# Testing
+.coverage
+coverage.xml
+pytest_cache/
+
+# Documentation
+docs/_build/
+
+# Temporary files
+*.tmp
+*.temp
+.cache/
