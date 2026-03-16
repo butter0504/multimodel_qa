@@ -222,9 +222,9 @@ docker-compose up -d
 
 ## 联系方式
 
-- 项目维护者：[Your Name]
-- 邮箱：[your.email@example.com]
-- GitHub：[your-github-username]
+- 项目维护者：[butter0504]
+- 邮箱：[butter0504@outlook.com]
+- GitHub：[butter0504]
 
 ---
 
