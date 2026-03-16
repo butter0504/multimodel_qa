@@ -328,126 +328,224 @@ if uploaded_file is not None:
         st.dataframe(df.head(10), use_container_width=True)
         st.markdown('</div>', unsafe_allow_html=True)
     
-    # 用 tabs 组织结果
-    tab1, tab2, tab3 = st.tabs(["📊 质量指标", "⚠️ 问题检测", "🔍 详细分析"])
-    
-    with tab1:
-        st.markdown("<h3>数据质量指标</h3>", unsafe_allow_html=True)
+    # 1. 基本统计卡片
+    st.markdown("<h2 style='margin-top: 30px;'>数据概览</h2>", unsafe_allow_html=True)
+    with st.container():
+        col1, col2, col3 = st.columns(3)
         
-        # 指标卡片
-        metrics = result["metrics"]
-        col1, col2, col3, col4, col5 = st.columns(5)
-        
+        # 总行数
         with col1:
             st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-            st.metric("行数", metrics["rows"])
+            st.metric("总行数", result["basic_info"]["rows"])
             st.markdown('</div>', unsafe_allow_html=True)
         
+        # 总列数
         with col2:
             st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-            st.metric("列数", metrics["columns"])
+            st.metric("总列数", result["basic_info"]["columns"])
             st.markdown('</div>', unsafe_allow_html=True)
         
+        # 缺失值率
         with col3:
             st.markdown('<div class="metric-card warning">', unsafe_allow_html=True)
-            st.metric("缺失值率", f"{metrics['missing_value_rate']:.2f}%")
-            st.markdown('</div>', unsafe_allow_html=True)
-        
-        with col4:
-            st.markdown('<div class="metric-card warning">', unsafe_allow_html=True)
-            st.metric("重复行率", f"{metrics['duplicate_row_rate']:.2f}%")
-            st.markdown('</div>', unsafe_allow_html=True)
-        
-        with col5:
-            st.markdown('<div class="metric-card error">', unsafe_allow_html=True)
-            st.metric("异常值率", f"{metrics['outlier_rate']:.2f}%")
+            st.metric("缺失值率", f"{result['metrics']['missing_value_rate']:.2f}%")
             st.markdown('</div>', unsafe_allow_html=True)
     
-    with tab2:
-        st.markdown("<h3>检测到的问题</h3>", unsafe_allow_html=True)
+    # 2. 问题样本列表
+    st.markdown("<h2 style='margin-top: 30px;'>问题检测</h2>", unsafe_allow_html=True)
+    issues = result["issues"]
+    if issues:
+        # 问题分类统计
+        issue_types = {}
+        for issue in issues:
+            issue_type = issue.get("type", "unknown")
+            issue_types[issue_type] = issue_types.get(issue_type, 0) + 1
         
-        issues = result["issues"]
-        if issues:
-            # 问题分类统计
-            issue_types = {}
+        # 显示问题类型分布
+        st.markdown("<h3>问题类型分布</h3>", unsafe_allow_html=True)
+        col1, col2, col3, col4 = st.columns(4)
+        issue_colors = {
+            "missing_value": "warning",
+            "outlier": "error",
+            "duplicate_rows": "warning",
+            "label_error": "error"
+        }
+        
+        for i, (issue_type, count) in enumerate(issue_types.items()):
+            color = issue_colors.get(issue_type, "")
+            if i % 4 == 0:
+                with col1:
+                    st.markdown(f'<div class="metric-card {color}">', unsafe_allow_html=True)
+                    st.metric(issue_type.replace("_", " ").title(), count)
+                    st.markdown('</div>', unsafe_allow_html=True)
+            elif i % 4 == 1:
+                with col2:
+                    st.markdown(f'<div class="metric-card {color}">', unsafe_allow_html=True)
+                    st.metric(issue_type.replace("_", " ").title(), count)
+                    st.markdown('</div>', unsafe_allow_html=True)
+            elif i % 4 == 2:
+                with col3:
+                    st.markdown(f'<div class="metric-card {color}">', unsafe_allow_html=True)
+                    st.metric(issue_type.replace("_", " ").title(), count)
+                    st.markdown('</div>', unsafe_allow_html=True)
+            else:
+                with col4:
+                    st.markdown(f'<div class="metric-card {color}">', unsafe_allow_html=True)
+                    st.metric(issue_type.replace("_", " ").title(), count)
+                    st.markdown('</div>', unsafe_allow_html=True)
+        
+        # 显示详细问题列表（带颜色标记）
+        st.markdown("<h3>问题样本列表</h3>", unsafe_allow_html=True)
+        with st.container():
+            st.markdown('<div class="card">', unsafe_allow_html=True)
+            # 构建问题数据框
+            issues_data = []
             for issue in issues:
-                issue_type = issue.get("type", "unknown")
-                issue_types[issue_type] = issue_types.get(issue_type, 0) + 1
+                issue_data = {
+                    "类型": issue.get("type", "unknown").replace("_", " ").title(),
+                    "列名": issue.get("column", "N/A"),
+                    "数量": issue.get("count", issue.get("index", "N/A")),
+                    "百分比": f"{issue.get('percentage', 0):.2f}%"
+                }
+                if "label_error" in issue.get("type", ""):
+                    issue_data["质量分数"] = f"{issue.get('quality_score', 0):.2f}"
+                issues_data.append(issue_data)
             
-            # 显示问题类型分布
-            st.markdown("<h4>问题类型分布</h4>", unsafe_allow_html=True)
-            for issue_type, count in issue_types.items():
-                if issue_type == "missing_value":
-                    st.markdown(f'<span class="tag warning">{issue_type}: {count}</span>', unsafe_allow_html=True)
-                elif issue_type == "outlier":
-                    st.markdown(f'<span class="tag error">{issue_type}: {count}</span>', unsafe_allow_html=True)
-                elif issue_type == "duplicate_rows":
-                    st.markdown(f'<span class="tag warning">{issue_type}: {count}</span>', unsafe_allow_html=True)
-                elif issue_type == "label_error":
-                    st.markdown(f'<span class="tag error">{issue_type}: {count}</span>', unsafe_allow_html=True)
+            issues_df = pd.DataFrame(issues_data)
+            
+            # 应用颜色样式
+            def highlight_issue(row):
+                issue_type = row['类型'].lower().replace(" ", "_")
+                if issue_type == "missing_value" or issue_type == "duplicate_rows":
+                    return ['background-color: #fef3c7'] * len(row)
+                elif issue_type == "outlier" or issue_type == "label_error":
+                    return ['background-color: #fee2e2'] * len(row)
                 else:
-                    st.markdown(f'<span class="tag">{issue_type}: {count}</span>', unsafe_allow_html=True)
+                    return [''] * len(row)
             
-            # 显示详细问题列表
-            st.markdown("<h4>详细问题列表</h4>", unsafe_allow_html=True)
-            with st.container():
-                st.markdown('<div class="card">', unsafe_allow_html=True)
-                issues_df = pd.DataFrame(issues)
-                st.dataframe(issues_df, use_container_width=True)
-                st.markdown('</div>', unsafe_allow_html=True)
+            st.dataframe(
+                issues_df.style.apply(highlight_issue, axis=1),
+                use_container_width=True
+            )
+            st.markdown('</div>', unsafe_allow_html=True)
+    else:
+        st.success("🎉 未检测到任何问题，数据质量良好！")
+    
+    # 3. 缺失值分布图表
+    st.markdown("<h2 style='margin-top: 30px;'>数据质量分析</h2>", unsafe_allow_html=True)
+    
+    # 缺失值分布
+    st.markdown("<h3>缺失值分布</h3>", unsafe_allow_html=True)
+    with st.container():
+        st.markdown('<div class="card">', unsafe_allow_html=True)
+        missing_stats = result["missing_stats"]
+        if missing_stats['total'] > 0:
+            # 准备缺失值数据
+            missing_data = []
+            for col, info in missing_stats['per_column'].items():
+                missing_data.append({
+                    "列名": col,
+                    "缺失数量": info['count'],
+                    "缺失率": info['percentage']
+                })
+            missing_df = pd.DataFrame(missing_data)
+            
+            # 按缺失率排序
+            missing_df = missing_df.sort_values('缺失率', ascending=False)
+            
+            # 绘制条形图
+            fig = px.bar(
+                missing_df,
+                x='列名',
+                y='缺失率',
+                text='缺失数量',
+                title='各列缺失值分布',
+                color='缺失率',
+                color_continuous_scale='Reds'
+            )
+            fig.update_layout(
+                xaxis_title='列名',
+                yaxis_title='缺失率 (%)',
+                height=400
+            )
+            st.plotly_chart(fig, use_container_width=True)
         else:
-            st.success("🎉 未检测到任何问题，数据质量良好！")
+            st.success("没有缺失值")
+        st.markdown('</div>', unsafe_allow_html=True)
     
-    with tab3:
-        st.markdown("<h3>详细分析</h3>", unsafe_allow_html=True)
-        
-        # 缺失值分析
-        st.markdown("<h4>缺失值分析</h4>", unsafe_allow_html=True)
-        with st.container():
-            st.markdown('<div class="card">', unsafe_allow_html=True)
-            missing_stats = result["missing_stats"]
-            st.write(f"总缺失值: {missing_stats['total']} ({missing_stats['percentage']:.2f}%)")
+    # 异常值分析
+    st.markdown("<h3>异常值分析</h3>", unsafe_allow_html=True)
+    with st.container():
+        st.markdown('<div class="card">', unsafe_allow_html=True)
+        outlier_stats = result["outlier_stats"]
+        if outlier_stats:
+            # 准备异常值数据
+            outlier_data = []
+            for col, info in outlier_stats.items():
+                outlier_data.append({
+                    "列名": col,
+                    "异常值数量": info['count'],
+                    "异常值率": info['percentage']
+                })
+            outlier_df = pd.DataFrame(outlier_data)
             
-            # 显示每列缺失值
-            if missing_stats['per_column']:
-                missing_df = pd.DataFrame.from_dict(missing_stats['per_column'], orient='index')
-                st.dataframe(missing_df, use_container_width=True)
-            else:
-                st.success("没有缺失值")
-            st.markdown('</div>', unsafe_allow_html=True)
-        
-        # 异常值分析
-        st.markdown("<h4>异常值分析</h4>", unsafe_allow_html=True)
+            # 按异常值率排序
+            outlier_df = outlier_df.sort_values('异常值率', ascending=False)
+            
+            # 绘制条形图
+            fig = px.bar(
+                outlier_df,
+                x='列名',
+                y='异常值率',
+                text='异常值数量',
+                title='各列异常值分布',
+                color='异常值率',
+                color_continuous_scale='Oranges'
+            )
+            fig.update_layout(
+                xaxis_title='列名',
+                yaxis_title='异常值率 (%)',
+                height=400
+            )
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.success("没有异常值")
+        st.markdown('</div>', unsafe_allow_html=True)
+    
+    # 标签错误分析
+    if label_col and result.get("label_issues"):
+        st.markdown("<h3>标签错误分析</h3>", unsafe_allow_html=True)
         with st.container():
             st.markdown('<div class="card">', unsafe_allow_html=True)
-            outlier_stats = result["outlier_stats"]
-            if outlier_stats:
-                for col, info in outlier_stats.items():
-                    st.write(f"**{col}**: {info['count']} 个异常值 ({info['percentage']:.2f}%)")
-                    st.write(f"  边界: [{info['bounds']['lower']:.2f}, {info['bounds']['upper']:.2f}]")
-            else:
-                st.success("没有异常值")
+            label_issues = result["label_issues"]
+            st.write(f"检测到 {label_issues.get('error_count', 0)} 个标签错误 ({label_issues.get('error_rate', 0):.2f}%)")
+            
+            # 显示质量分数分布
+            if label_issues.get('label_quality_scores'):
+                quality_scores = label_issues['label_quality_scores']
+                fig = px.histogram(
+                    x=quality_scores,
+                    title='标签质量分数分布',
+                    labels={'x': '质量分数', 'y': '样本数'},
+                    nbins=20
+                )
+                fig.add_vline(x=0.6, line_dash="dash", line_color="red", annotation_text="阈值 (0.6)")
+                fig.update_layout(height=400)
+                st.plotly_chart(fig, use_container_width=True)
+            
+            # 显示质量分数统计
+            if label_issues.get('debug_info'):
+                debug_info = label_issues['debug_info']
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("平均质量分数", f"{debug_info.get('mean_quality_score', 0):.2f}")
+                with col2:
+                    st.metric("最低质量分数", f"{debug_info.get('min_quality_score', 0):.2f}")
+                with col3:
+                    st.metric("最高质量分数", f"{debug_info.get('max_quality_score', 0):.2f}")
             st.markdown('</div>', unsafe_allow_html=True)
-        
-        # 标签错误分析
-        if label_col and result.get("label_issues"):
-            st.markdown("<h4>标签错误分析</h4>", unsafe_allow_html=True)
-            with st.container():
-                st.markdown('<div class="card">', unsafe_allow_html=True)
-                label_issues = result["label_issues"]
-                st.write(f"检测到 {label_issues.get('error_count', 0)} 个标签错误 ({label_issues.get('error_rate', 0):.2f}%)")
-                
-                if label_issues.get('error_indices'):
-                    st.write("错误标签索引:", label_issues['error_indices'])
-                
-                # 显示质量分数统计
-                if label_issues.get('debug_info'):
-                    debug_info = label_issues['debug_info']
-                    st.write(f"平均质量分数: {debug_info.get('mean_quality_score', 0):.2f}")
-                    st.write(f"最低质量分数: {debug_info.get('min_quality_score', 0):.2f}")
-                st.markdown('</div>', unsafe_allow_html=True)
     
-    # 下载报告按钮
+    # 4. 下载报告按钮
     st.markdown("<h2 style='margin-top: 30px;'>导出报告</h2>", unsafe_allow_html=True)
     with st.container():
         st.markdown('<div class="card">', unsafe_allow_html=True)
@@ -469,7 +567,7 @@ if uploaded_file is not None:
         
         # 下载按钮
         st.download_button(
-            label="📥 下载 JSON 报告",
+            label="📥 下载详细报告",
             data=report_json,
             file_name=f"table_analysis_report_{uploaded_file.name.split('.')[0]}.json",
             mime="application/json"

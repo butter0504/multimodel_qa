@@ -314,15 +314,15 @@ if st.session_state.page == "首页":
     col1, col2, col3 = st.columns(3)
     
     with col1:
-        if st.button("📊 表格分析", use_container_width=True):
+        if st.button("表格分析", use_container_width=True):
             st.switch_page("pages/01_表格分析.py")
     
     with col2:
-        if st.button("📝 文本分析", use_container_width=True):
+        if st.button("文本分析", use_container_width=True):
             st.switch_page("pages/02_文本分析.py")
     
     with col3:
-        if st.button("🖼️ 图像分析", use_container_width=True):
+        if st.button("图像分析", use_container_width=True):
             st.switch_page("pages/03_图像分析.py")
     st.markdown('</div>', unsafe_allow_html=True)
     
