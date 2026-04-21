@@ -1,13 +1,11 @@
 import streamlit as st
 import pandas as pd
-import plotly.express as px
-from modules.text_detector import TextDetector
 import requests
+import time
+from modules.text_detector import TextDetector
 
-# 禁用Streamlit自动生成的导航
 st.markdown("""
 <style>
-/* 隐藏Streamlit自动生成的导航 */
 [data-testid="stSidebarNav"] {
     display: none;
 }
@@ -25,7 +23,6 @@ st.markdown("""
     --border-color: #E5E7EB;
 }
 
-/* 全局样式 */
 body {
     font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
     color: var(--text-primary);
@@ -33,7 +30,6 @@ body {
     background-color: var(--bg-light);
 }
 
-/* 标题样式 */
 .page-title {
     font-size: 2rem;
     font-weight: 700;
@@ -43,7 +39,6 @@ body {
     margin-bottom: 1.5rem;
 }
 
-/* 卡片样式 */
 .card {
     background: var(--bg-white);
     border-radius: 12px;
@@ -59,7 +54,6 @@ body {
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
 }
 
-/* 按钮样式 */
 .stButton > button {
     background: linear-gradient(135deg, var(--primary-color), var(--primary-light));
     color: white;
@@ -75,7 +69,6 @@ body {
     box-shadow: 0 4px 8px rgba(30, 58, 138, 0.3);
 }
 
-/* 指标卡片 */
 .metric-card {
     background: var(--bg-light);
     border-radius: 8px;
@@ -96,7 +89,6 @@ body {
     border-left-color: var(--error-color);
 }
 
-/* 上传区域样式 */
 .upload-area {
     border: 2px dashed var(--border-color);
     border-radius: 12px;
@@ -110,188 +102,21 @@ body {
     border-color: var(--primary-light);
     background: rgba(79, 70, 229, 0.02);
 }
-
-/* 标签样式 */
-.tag {
-    display: inline-block;
-    padding: 4px 12px;
-    border-radius: 16px;
-    font-size: 12px;
-    font-weight: 600;
-    margin-right: 8px;
-    margin-bottom: 8px;
-}
-
-.tag.success {
-    background: #d1fae5;
-    color: #065f46;
-}
-
-.tag.warning {
-    background: #fef3c7;
-    color: #92400e;
-}
-
-.tag.error {
-    background: #fee2e2;
-    color: #991b1b;
-}
-
-/* 侧边栏样式 */
-.sidebar-section {
-    margin-bottom: 2rem;
-}
-
-.sidebar-section-title {
-    font-size: 1rem;
-    font-weight: 600;
-    color: var(--text-primary);
-    margin-bottom: 0.8rem;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-}
-
-/* 导航样式 */
-.nav-radio .stRadio > div {
-    flex-direction: column;
-}
-
-.nav-radio .stRadio label {
-    padding: 10px 16px;
-    border-radius: 8px;
-    transition: all 0.3s ease;
-    margin-bottom: 4px;
-}
-
-.nav-radio .stRadio label:hover {
-    background: rgba(30, 58, 138, 0.05);
-}
-
-.nav-radio .stRadio input[type="radio"]:checked + label {
-    background: rgba(30, 58, 138, 0.1);
-    font-weight: 600;
-    color: var(--primary-color);
-    border-left: 4px solid var(--primary-color);
-}
-
-/* 状态标签 */
-.status-tag {
-    display: inline-block;
-    padding: 4px 12px;
-    border-radius: 16px;
-    font-size: 0.875rem;
-    font-weight: 600;
-    margin-right: 8px;
-    margin-bottom: 8px;
-}
-
-.status-tag.success {
-    background: #d1fae5;
-    color: #065f46;
-}
-
-.status-tag.warning {
-    background: #fef3c7;
-    color: #92400e;
-}
-
-.status-tag.error {
-    background: #fee2e2;
-    color: #991b1b;
-}
 </style>
 """, unsafe_allow_html=True)
 
-# 缓存函数
-@st.cache_data(ttl=60)
-def check_api_status():
-    """检查API状态并缓存60秒"""
-    try:
-        import time
-        start_time = time.time()
-        response = requests.get("http://localhost:8000/health", timeout=2)
-        response_time = (time.time() - start_time) * 1000
-        return {
-            "status": response.status_code == 200,
-            "response_time": round(response_time, 2)
-        }
-    except Exception as e:
-        return {
-            "status": False,
-            "response_time": None,
-            "error": str(e)
-        }
-
-# 初始化会话状态
 if "page" not in st.session_state:
     st.session_state.page = "文本分析"
 
 if "recent_analyses" not in st.session_state:
     st.session_state.recent_analyses = []
 
-# 侧边栏
+# 侧边栏 - 只保留返回首页按钮
 with st.sidebar:
-    # 主要导航
-    st.markdown('<div class="sidebar-section nav-radio">', unsafe_allow_html=True)
-    st.markdown('<div class="sidebar-section-title">导航</div>', unsafe_allow_html=True)
-    selected_page = st.radio(
-        "选择功能",
-        ["首页", "表格分析", "文本分析", "图像分析", "API测试"],
-        key="nav_radio",
-        label_visibility="collapsed",
-        index=2  # 默认选中文本分析
-    )
-    st.markdown('</div>', unsafe_allow_html=True)
-    
-    # 系统状态
-    st.markdown('<div class="sidebar-section">', unsafe_allow_html=True)
-    st.markdown('<div class="sidebar-section-title">系统状态</div>', unsafe_allow_html=True)
-    
-    with st.expander("查看状态", expanded=False):
-        # 刷新按钮
-        if st.button("刷新状态", use_container_width=True):
-            # 清除缓存
-            check_api_status.clear()
-            st.rerun()
-        
-        # API状态
-        api_status = check_api_status()
-        if api_status["status"]:
-            st.markdown(f'<span class="status-tag success">API: 正常</span>', unsafe_allow_html=True)
-            if api_status["response_time"]:
-                st.markdown(f'<span class="status-tag success">响应: {api_status["response_time"]}ms</span>', unsafe_allow_html=True)
-        else:
-            st.markdown('<span class="status-tag error">API: 未运行</span>', unsafe_allow_html=True)
-        
-        # 环境信息
-        st.markdown('<div style="margin-top: 10px;">', unsafe_allow_html=True)
-        st.write("环境信息:")
-        st.info("Python 3.9+")
-        st.info("Cleanlab 2.7.1")
-        st.info("Streamlit 1.50.0")
-        st.markdown('</div>', unsafe_allow_html=True)
-    st.markdown('</div>', unsafe_allow_html=True)
-    
-    # 最近分析记录
-    if st.session_state.recent_analyses:
-        st.markdown('<div class="sidebar-section">', unsafe_allow_html=True)
-        st.markdown('<div class="sidebar-section-title">最近分析</div>', unsafe_allow_html=True)
-        for analysis in st.session_state.recent_analyses[-5:]:  # 显示最近5条
-            st.write(f"• {analysis['type']}: {analysis['file']}")
-        st.markdown('</div>', unsafe_allow_html=True)
-
-# 页面导航逻辑
-if selected_page != st.session_state.page:
-    st.session_state.page = selected_page
-    # 对于非当前页面，使用Streamlit的页面导航
-    if selected_page == "首页":
+    if st.button("返回首页", width='stretch'):
+        st.session_state.page = "首页"
+        st.session_state.current_project = None
         st.switch_page("main.py")
-    elif selected_page == "表格分析":
-        st.switch_page("pages/01_表格分析.py")
-    elif selected_page == "图像分析":
-        st.switch_page("pages/03_图像分析.py")
-    elif selected_page == "API测试":
-        st.switch_page("pages/04_API测试.py")
 
 # 页面标题
 st.markdown('<h1 class="page-title">文本数据质量分析</h1>', unsafe_allow_html=True)
@@ -306,64 +131,45 @@ uploaded_file = st.file_uploader(
 )
 st.markdown('</div>', unsafe_allow_html=True)
 
-if uploaded_file is not None:
-    # 读取数据
-    contents = uploaded_file.read().decode("utf-8")
-    texts = contents.splitlines()
-    
-    # 显示数据预览
-    st.markdown("<h2 style='margin-top: 30px;'>数据预览</h2>", unsafe_allow_html=True)
-    with st.container():
-        st.markdown('<div class="card">', unsafe_allow_html=True)
-        st.write(f"总文本数量: {len(texts)}")
-        st.write("前5条文本:")
-        for i, text in enumerate(texts[:5]):
-            st.write(f"{i+1}. {text}")
-        st.markdown('</div>', unsafe_allow_html=True)
-    
-    # 检测数据质量
-    detector = TextDetector()
-    result = detector.detect(texts)
-    
-    # 显示检测结果
-    st.markdown("<h2 style='margin-top: 30px;'>检测结果</h2>", unsafe_allow_html=True)
-    
-    # 显示指标
-    st.markdown("<h3>数据质量指标</h3>", unsafe_allow_html=True)
-    metrics = result["metrics"]
-    col1, col2, col3, col4 = st.columns(4)
-    
-    with col1:
-        st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-        st.metric("总文本数", metrics["total_texts"])
-        st.markdown('</div>', unsafe_allow_html=True)
-    
-    with col2:
-        st.markdown('<div class="metric-card warning">', unsafe_allow_html=True)
-        st.metric("空文本率", f"{metrics['empty_text_rate']:.2f}%")
-        st.markdown('</div>', unsafe_allow_html=True)
-    
-    with col3:
-        st.markdown('<div class="metric-card warning">', unsafe_allow_html=True)
-        st.metric("重复文本率", f"{metrics['duplicate_text_rate']:.2f}%")
-        st.markdown('</div>', unsafe_allow_html=True)
-    
-    with col4:
-        st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-        st.metric("平均长度", f"{metrics['average_length']:.2f}")
-        st.markdown('</div>', unsafe_allow_html=True)
-    
-    # 显示问题
-    st.markdown("<h3>检测到的问题</h3>", unsafe_allow_html=True)
-    issues = result["issues"]
-    if issues:
-        with st.container():
-            st.markdown('<div class="card">', unsafe_allow_html=True)
-            issues_df = pd.DataFrame(issues)
-            st.dataframe(issues_df, use_container_width=True)
-            st.markdown('</div>', unsafe_allow_html=True)
-    else:
-        st.success("🎉 未检测到任何问题，数据质量良好！")
+# 项目名称
+project_name = st.text_input("项目名称", placeholder="输入项目名称")
+
+# 开始分析按钮
+if uploaded_file and project_name:
+    if st.button("开始分析", use_container_width=True):
+        with st.spinner("正在分析文本数据..."):
+            contents = uploaded_file.read().decode("utf-8")
+            texts = contents.splitlines()
+            
+            detector = TextDetector()
+            result = detector.detect(texts)
+            
+            current_time = time.strftime("%Y-%m-%d %H:%M:%S")
+            
+            analysis_record = {
+                "name": project_name,
+                "type": "文本",
+                "file": uploaded_file.name,
+                "time": current_time,
+                "results": result,
+                "file_object": uploaded_file
+            }
+            
+            if "analysis_history" not in st.session_state:
+                st.session_state.analysis_history = []
+            st.session_state.analysis_history.append(analysis_record)
+            
+            if "recent_analyses" not in st.session_state:
+                st.session_state.recent_analyses = []
+            st.session_state.recent_analyses.append(analysis_record)
+            
+            if len(st.session_state.recent_analyses) > 5:
+                st.session_state.recent_analyses = st.session_state.recent_analyses[-5:]
+            
+            st.session_state.analysis_result = result
+            st.session_state.uploaded_file = uploaded_file
+            
+            st.switch_page("pages/07_文本分析详情.py")
 
 # 页脚
 st.markdown("""
