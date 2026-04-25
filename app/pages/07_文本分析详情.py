@@ -1,6 +1,25 @@
 import streamlit as st
 import pandas as pd
 import json
+import numpy as np
+
+
+def convert_to_serializable(obj):
+    """递归转换 numpy 类型为 Python 原生类型，确保 JSON 可序列化"""
+    if isinstance(obj, dict):
+        return {str(k) if not isinstance(k, (str, int, float, bool, type(None))) else k: 
+                convert_to_serializable(v) for k, v in obj.items()}
+    elif isinstance(obj, (list, tuple)):
+        return [convert_to_serializable(item) for item in obj]
+    elif isinstance(obj, np.integer):
+        return int(obj)
+    elif isinstance(obj, np.floating):
+        return float(obj)
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif isinstance(obj, np.bool_):
+        return bool(obj)
+    return obj
 
 st.markdown("""
 <style>
@@ -185,7 +204,7 @@ with tab3:
     st.markdown("<h2>原始分析结果</h2>", unsafe_allow_html=True)
     with st.container():
         st.markdown('<div class="card">', unsafe_allow_html=True)
-        st.json(result)
+        st.json(convert_to_serializable(result))
         st.markdown('</div>', unsafe_allow_html=True)
 
 # 下载报告按钮
@@ -199,6 +218,7 @@ with st.container():
         "issues": result.get("issues", [])
     }
     
+    report_data = convert_to_serializable(report_data)
     report_json = json.dumps(report_data, indent=2, ensure_ascii=False)
     
     st.download_button(

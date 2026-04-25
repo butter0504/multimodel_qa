@@ -350,119 +350,382 @@ upload_method = st.selectbox(
 
 # 文件上传
 if upload_method == "文件上传":
-    uploaded_file = st.file_uploader(
-        "拖拽文件到此处或点击上传",
-        type=["csv", "xlsx", "txt", "jpg", "png", "zip"],
-        accept_multiple_files=False,
-        help="支持 CSV、Excel、TXT、JPG、PNG 文件和ZIP压缩包"
+    data_source_type = st.radio(
+        "选择数据源类型",
+        ["已有标签文件（CSV/JSON）", "标准数据集（自动识别）", 
+         "文件夹结构（文件夹名=标签）", "无标签（仅部分检测）"],
+        horizontal=True
     )
     
-    # 项目名称
-    project_name = st.text_input("项目名称", placeholder="输入项目名称")
-    
-    # 分析类型选择
-    analysis_type = st.selectbox(
-        "选择分析类型",
-        ["自动检测", "表格分析", "文本分析", "图像分析"]
-    )
-    
-    # 确认上传按钮
-    if uploaded_file and project_name:
-        if st.button("确认上传", width='stretch'):
-            import time
-            # 记录当前时间
-            current_time = time.strftime("%Y-%m-%d %H:%M:%S")
+    if data_source_type == "标准数据集（自动识别）":
+        st.markdown("#### 标准数据集选择")
+        dataset_name = st.selectbox(
+            "选择数据集",
+            ["CIFAR-10", "CIFAR-100", "CIFAR-10N (噪声标签)", "CIFAR-100N (噪声标签)",
+             "Tiny-ImageNet", "MNIST", "Fashion-MNIST"]
+        )
+        
+        data_path_input = st.text_input(
+            "数据集路径",
+            value=r"c:\Users\abc14\Desktop\毕业设计\代码\multimodel_qa\data\raw",
+            help="数据集文件所在目录"
+        )
+        
+        sample_size = st.number_input(
+            "加载样本数（0=全部）",
+            min_value=0, max_value=50000, value=1000, step=100
+        )
+        
+        project_name = st.text_input("项目名称", placeholder="输入项目名称")
+        
+        if st.button("加载数据集", use_container_width=True):
+            import sys
+            sys.path.insert(0, str(Path(__file__).parent.parent))
+            from modules.data_adapter import DataAdapter
             
-            # 自动检测文件类型
-            file_ext = uploaded_file.name.split('.')[-1].lower()
-            if analysis_type == "自动检测":
-                if file_ext in ['csv', 'xlsx']:
-                    analysis_type = "表格分析"
-                elif file_ext == 'txt':
-                    analysis_type = "文本分析"
-                elif file_ext in ['jpg', 'png', 'zip']:
-                    analysis_type = "图像分析"
-            
-            # 读取数据并获取基本信息
-            basic_info = {}
-            file_content = None
-            if analysis_type == "表格分析":
-                import pandas as pd
-                # 读取数据
+            with st.spinner(f"正在加载 {dataset_name} 数据集..."):
                 try:
-                    if file_ext == 'csv':
-                        df = pd.read_csv(uploaded_file)
-                    else:
-                        df = pd.read_excel(uploaded_file)
+                    adapter = DataAdapter()
                     
-                    # 基本信息
-                    basic_info = {
-                        "rows": len(df),
-                        "columns": len(df.columns),
-                        "columns_list": list(df.columns)
-                    }
-                    # 存储数据框
-                    file_content = df
+                    actual_dataset_name = dataset_name.replace(" (噪声标签)", "").replace(" ", "")
+                    
+                    result = adapter.load(
+                        source_type='standard_dataset',
+                        dataset_name=actual_dataset_name,
+                        data_path=data_path_input,
+                        sample_size=sample_size if sample_size > 0 else None
+                    )
+                    
+                    st.session_state.adapter_result = result
+                    st.session_state.image_filenames = result.get('filenames', [])
+                    st.session_state.image_labels = result.get('labels')
+                    st.session_state.label_names = result.get('label_names', [])
+                    
+                    if result.get('has_clean_labels'):
+                        st.session_state.clean_labels = result.get('clean_labels')
+                        noise_rate = result['metadata'].get('noise_rate', 0)
+                        st.warning(f"噪声标签数据集 - 实际噪声率: {noise_rate:.1%}")
+                    else:
+                        st.session_state.clean_labels = None
+                    
+                    st.success(f"加载完成: {result['metadata'].get('total_samples', 0)} 张图像, "
+                              f"{len(result.get('label_names', []))} 个类别")
+                    
+                    st.info(f"类别: {', '.join(result.get('label_names', [])[:10])}"
+                           f"{'...' if len(result.get('label_names', [])) > 10 else ''}")
+                    
                 except Exception as e:
-                    st.error(f"读取文件失败: {str(e)}")
-                    st.stop()
-            elif analysis_type == "文本分析":
-                # 读取文本内容
-                try:
-                    text_content = uploaded_file.getvalue().decode('utf-8')
-                    # 基本信息
-                    basic_info = {
-                        "length": len(text_content),
-                        "lines": len(text_content.splitlines())
+                    st.error(f"加载失败: {str(e)}")
+        
+        if 'adapter_result' in st.session_state:
+            st.markdown("#### 检测模块选择")
+            col_m1, col_m2 = st.columns(2)
+            with col_m1:
+                run_basic = st.checkbox("基础质量检测", value=True, disabled=True)
+                run_label = st.checkbox("标签错误检测", value=True)
+            with col_m2:
+                run_uncertainty = st.checkbox("不确定性估计", value=True)
+            
+            image_modules = ['basic_quality']
+            if run_label:
+                image_modules.append('label_error')
+            if run_uncertainty:
+                image_modules.append('uncertainty')
+            
+            project_name = st.text_input("项目名称", placeholder="输入项目名称", key='project_name_std')
+            
+            if st.button("开始检测", use_container_width=True):
+                import time
+                import sys
+                sys.path.insert(0, str(Path(__file__).parent.parent))
+                
+                current_time = time.strftime("%Y-%m-%d %H:%M:%S")
+                adapter_result = st.session_state.adapter_result
+                
+                with st.spinner("正在执行数据质量检测..."):
+                    from modules.image_detector import ImageDetector
+                    from modules.config import Config
+                    
+                    cfg = Config.fromfile(str(Path(__file__).parent.parent / 'config.yaml'))
+                    detector = ImageDetector(cfg)
+                    
+                    analysis_result = detector.detect(
+                        adapter_result['images'],
+                        labels=adapter_result.get('labels'),
+                        modules=image_modules,
+                    )
+                    
+                    st.session_state.analysis_result = analysis_result
+                    
+                    project = {
+                        "id": len(st.session_state.projects) + 1,
+                        "name": project_name or dataset_name,
+                        "file_name": dataset_name,
+                        "analysis_type": "图像分析",
+                        "upload_time": current_time,
+                        "file_content": adapter_result['images'],
+                        "basic_info": adapter_result['metadata'],
                     }
-                    # 存储文本内容
-                    file_content = text_content
-                except Exception as e:
-                    st.error(f"读取文件失败: {str(e)}")
-                    st.stop()
-            elif analysis_type == "图像分析":
-                # 读取图像内容
-                try:
-                    image_bytes = uploaded_file.getvalue()
-                    # 基本信息
-                    basic_info = {
-                        "file_size": len(image_bytes),
-                        "format": file_ext
-                    }
-                    # 存储图像内容
-                    file_content = image_bytes
-                except Exception as e:
-                    st.error(f"读取文件失败: {str(e)}")
-                    st.stop()
+                    
+                    st.session_state.projects.append(project)
+                    st.session_state.current_project = project
+                    
+                    st.switch_page("pages/06_图像分析详情.py")
+    
+    else:
+        uploaded_file = st.file_uploader(
+            "拖拽文件到此处或点击上传",
+            type=["csv", "xlsx", "txt", "jpg", "png", "zip"],
+            accept_multiple_files=False,
+            help="支持 CSV、Excel、TXT、JPG、PNG 文件和ZIP压缩包"
+        )
+        
+        project_name = st.text_input("项目名称", placeholder="输入项目名称")
+        
+        analysis_type = st.selectbox(
+            "选择分析类型",
+            ["自动检测", "表格分析", "文本分析", "图像分析"]
+        )
+        
+        file_ext = uploaded_file.name.split('.')[-1].lower() if uploaded_file else ""
+        if analysis_type == "自动检测" and uploaded_file:
+            if file_ext in ['csv', 'xlsx']:
+                analysis_type = "表格分析"
+            elif file_ext == 'txt':
+                analysis_type = "文本分析"
+            elif file_ext in ['jpg', 'png', 'zip']:
+                analysis_type = "图像分析"
+        
+        label_col_input = None
+        image_modules = ['basic_quality']
+        image_labels = None
+        reference_images = None
+        
+        if uploaded_file and analysis_type == "表格分析":
+            import pandas as pd
+            try:
+                if file_ext == 'csv':
+                    df_preview = pd.read_csv(uploaded_file)
+                else:
+                    df_preview = pd.read_excel(uploaded_file)
+                columns_list = df_preview.columns.tolist()
+                st.info(f"已读取文件: {uploaded_file.name} ({len(df_preview)} 行 × {len(columns_list)} 列)")
+                label_col_input = st.selectbox(
+                    "选择标签列（用于标签错误检测）",
+                    options=["无"] + columns_list,
+                    index=0,
+                    help="选择包含目标标签的列，系统将使用置信学习检测该列的标注错误"
+                )
+                if label_col_input == "无":
+                    label_col_input = None
+            except Exception as e:
+                st.error(f"读取文件失败: {str(e)}")
+        
+        if uploaded_file and analysis_type == "图像分析":
+            st.markdown("#### 检测模块选择")
+            col_m1, col_m2 = st.columns(2)
+            with col_m1:
+                run_basic = st.checkbox("基础质量检测", value=True, disabled=True,
+                                       help="模糊/曝光/噪声/分辨率/对比度，速度快")
+                run_label = st.checkbox("标签错误检测", value=False,
+                                       help="基于置信学习检测标签错误，需提供标签")
+                run_shift = st.checkbox("分布偏移检测", value=False,
+                                       help="检测与基准集的分布差异，需提供基准集")
+            with col_m2:
+                run_uncertainty = st.checkbox("不确定性估计", value=False,
+                                            help="检测困难样本，需提供标签")
             
-            # 创建项目
-            project = {
-                "id": len(st.session_state.projects) + 1,
-                "name": project_name,
-                "file_name": uploaded_file.name,
-                "analysis_type": analysis_type,
-                "upload_time": current_time,
-                "file_content": file_content,
-                "basic_info": basic_info
-            }
+            if run_label or run_uncertainty:
+                label_file = st.file_uploader("上传标签文件（CSV，需包含 filename 和 label 列）",
+                                              type=['csv'], key='image_label_file')
+                if label_file:
+                    import pandas as pd
+                    try:
+                        label_df = pd.read_csv(label_file)
+                        if 'filename' in label_df.columns and 'label' in label_df.columns:
+                            label_map = dict(zip(label_df['filename'].astype(str), label_df['label']))
+                            st.session_state.image_label_map = label_map
+                            st.success(f"已加载标签文件，共 {len(label_df)} 条记录")
+                        else:
+                            st.error("标签文件需包含 filename 和 label 两列")
+                    except Exception as e:
+                        st.error(f"读取标签文件失败: {str(e)}")
             
-            # 存储项目到数据库
-            db_project_id = db.add_project(project)
-            if db_project_id:
-                project['db_id'] = db_project_id
-                print(f"项目已存储到数据库，ID: {db_project_id}")
+            if run_shift:
+                ref_file = st.file_uploader("上传基准图像集（ZIP格式）",
+                                           type=['zip'], key='reference_images')
+                if ref_file:
+                    try:
+                        from modules.image_detector import ImageDetector
+                        ref_bytes = ref_file.getvalue()
+                        reference_images, _ = ImageDetector.load_images_from_zip(ref_bytes)
+                        st.session_state.reference_images_data = reference_images
+                        st.success(f"已加载 {len(reference_images)} 张基准图像")
+                    except Exception as e:
+                        st.error(f"读取基准集失败: {str(e)}")
             
-            # 存储项目到会话状态
-            st.session_state.projects.append(project)
-            st.session_state.current_project = project
-            
-            # 跳转到对应的详情页面
-            if analysis_type == "表格分析":
-                st.switch_page("pages/05_表格分析详情.py")
-            elif analysis_type == "文本分析":
-                st.switch_page("pages/07_文本分析详情.py")
-            elif analysis_type == "图像分析":
-                st.switch_page("pages/06_图像分析详情.py")
+            image_modules = ['basic_quality']
+            if run_label:
+                image_modules.append('label_error')
+            if run_shift:
+                image_modules.append('distribution_shift')
+            if run_uncertainty:
+                image_modules.append('uncertainty')
+        
+        if uploaded_file and project_name:
+            if st.button("确认上传", width='stretch'):
+                import time
+                import sys
+                sys.path.insert(0, str(Path(__file__).parent.parent))
+                
+                current_time = time.strftime("%Y-%m-%d %H:%M:%S")
+                
+                basic_info = {}
+                file_content = None
+                
+                if analysis_type == "表格分析":
+                    import pandas as pd
+                    try:
+                        uploaded_file.seek(0)
+                        if file_ext == 'csv':
+                            df = pd.read_csv(uploaded_file)
+                        else:
+                            df = pd.read_excel(uploaded_file)
+                        basic_info = {
+                            "rows": len(df),
+                            "columns": len(df.columns),
+                            "columns_list": list(df.columns)
+                        }
+                        file_content = df
+                    except Exception as e:
+                        st.error(f"读取文件失败: {str(e)}")
+                        st.stop()
+                        
+                elif analysis_type == "文本分析":
+                    try:
+                        text_content = uploaded_file.getvalue().decode('utf-8')
+                        text_lines = text_content.splitlines()
+                        basic_info = {
+                            "length": len(text_content),
+                            "lines": len(text_lines)
+                        }
+                        file_content = text_lines
+                    except Exception as e:
+                        st.error(f"读取文件失败: {str(e)}")
+                        st.stop()
+                        
+                elif analysis_type == "图像分析":
+                    try:
+                        from modules.image_detector import ImageDetector
+                        if file_ext == 'zip':
+                            image_bytes = uploaded_file.getvalue()
+                            images_list, fnames = ImageDetector.load_images_from_zip(image_bytes)
+                            basic_info = {
+                                "file_size": len(image_bytes),
+                                "format": "zip",
+                                "image_count": len(images_list)
+                            }
+                            file_content = images_list
+                            st.session_state.image_filenames = fnames
+                            
+                            label_map = st.session_state.get('image_label_map', {})
+                            if label_map and ('label_error' in image_modules or 'uncertainty' in image_modules):
+                                image_labels = [label_map.get(f, None) for f in fnames]
+                                none_count = sum(1 for l in image_labels if l is None)
+                                if none_count > 0:
+                                    st.warning(f"有 {none_count} 张图片未找到对应标签")
+                                else:
+                                    st.info(f"已匹配 {len([l for l in image_labels if l is not None])} 个标签")
+                        else:
+                            image_bytes = uploaded_file.getvalue()
+                            basic_info = {
+                                "file_size": len(image_bytes),
+                                "format": file_ext
+                            }
+                            file_content = [image_bytes]
+                            st.session_state.image_filenames = [uploaded_file.name]
+                            
+                            label_map = st.session_state.get('image_label_map', {})
+                            if label_map and ('label_error' in image_modules or 'uncertainty' in image_modules):
+                                image_labels = [label_map.get(uploaded_file.name, None)]
+                    except Exception as e:
+                        st.error(f"读取文件失败: {str(e)}")
+                        st.stop()
+                    
+                    if 'distribution_shift' in image_modules:
+                        reference_images = st.session_state.get('reference_images_data', None)
+                        if reference_images:
+                            st.info(f"使用基准集: {len(reference_images)} 张图像")
+                
+                with st.spinner("正在执行数据质量检测..."):
+                    analysis_result = None
+                    
+                    if analysis_type == "表格分析":
+                        from modules.table_detector import TableDetector
+                        from modules.config import Config
+                        
+                        cfg = Config.fromfile(str(Path(__file__).parent.parent / 'config.yaml'))
+                        detector = TableDetector(cfg)
+                        analysis_result = detector.detect(file_content, label_col=label_col_input)
+                        st.session_state.label_col = label_col_input
+                        
+                    elif analysis_type == "文本分析":
+                        from modules.text_detector import TextDetector
+                        from modules.config import Config
+                        
+                        cfg = Config.fromfile(str(Path(__file__).parent.parent / 'config.yaml'))
+                        detector = TextDetector(cfg)
+                        analysis_result = detector.detect(file_content)
+                        
+                    elif analysis_type == "图像分析":
+                        from modules.image_detector import ImageDetector
+                        from modules.config import Config
+                        
+                        cfg = Config.fromfile(str(Path(__file__).parent.parent / 'config.yaml'))
+                        detector = ImageDetector(cfg)
+                        
+                        final_modules = ['basic_quality']
+                        if 'label_error' in image_modules and image_labels and any(l is not None for l in image_labels):
+                            final_modules.append('label_error')
+                        if 'distribution_shift' in image_modules and reference_images:
+                            final_modules.append('distribution_shift')
+                        if 'uncertainty' in image_modules and image_labels and any(l is not None for l in image_labels):
+                            final_modules.append('uncertainty')
+                        
+                        analysis_result = detector.detect(
+                            file_content,
+                            labels=image_labels,
+                            modules=final_modules,
+                            reference_images=reference_images,
+                        )
+                    
+                    st.session_state.analysis_result = analysis_result
+                    st.session_state.uploaded_file = uploaded_file
+                
+                project = {
+                    "id": len(st.session_state.projects) + 1,
+                    "name": project_name,
+                    "file_name": uploaded_file.name,
+                    "analysis_type": analysis_type,
+                    "upload_time": current_time,
+                    "file_content": file_content,
+                    "basic_info": basic_info
+                }
+                
+                db_project_id = db.add_project(project)
+                if db_project_id:
+                    project['db_id'] = db_project_id
+                    print(f"项目已存储到数据库，ID: {db_project_id}")
+                
+                st.session_state.projects.append(project)
+                st.session_state.current_project = project
+                
+                if analysis_type == "表格分析":
+                    st.switch_page("pages/05_表格分析详情.py")
+                elif analysis_type == "文本分析":
+                    st.switch_page("pages/07_文本分析详情.py")
+                elif analysis_type == "图像分析":
+                    st.switch_page("pages/06_图像分析详情.py")
 
 # 历史上传
 elif upload_method == "历史上传":
@@ -471,13 +734,41 @@ elif upload_method == "历史上传":
         selected_project = st.selectbox("选择历史项目", project_ids)
         
         if st.button("加载项目", width='stretch'):
-            # 提取项目ID
             project_id = int(selected_project.split(':')[0].split()[1])
-            # 查找项目
             for project in st.session_state.projects:
                 if project['id'] == project_id:
                     st.session_state.current_project = project
-                    # 跳转到对应的详情页面
+                    
+                    if 'analysis_result' not in st.session_state or st.session_state.analysis_result is None:
+                        import sys
+                        sys.path.insert(0, str(Path(__file__).parent.parent))
+                        
+                        fc = project.get('file_content')
+                        at = project.get('analysis_type', '')
+                        
+                        if fc is not None:
+                            with st.spinner("正在重新执行检测..."):
+                                if at == "表格分析":
+                                    from modules.table_detector import TableDetector
+                                    from modules.config import Config
+                                    cfg = Config.fromfile(str(Path(__file__).parent.parent / 'config.yaml'))
+                                    detector = TableDetector(cfg)
+                                    lc = project.get('label_col')
+                                    st.session_state.analysis_result = detector.detect(fc, label_col=lc)
+                                    st.session_state.label_col = lc
+                                elif at == "文本分析":
+                                    from modules.text_detector import TextDetector
+                                    from modules.config import Config
+                                    cfg = Config.fromfile(str(Path(__file__).parent.parent / 'config.yaml'))
+                                    detector = TextDetector(cfg)
+                                    st.session_state.analysis_result = detector.detect(fc)
+                                elif at == "图像分析":
+                                    from modules.image_detector import ImageDetector
+                                    from modules.config import Config
+                                    cfg = Config.fromfile(str(Path(__file__).parent.parent / 'config.yaml'))
+                                    detector = ImageDetector(cfg)
+                                    st.session_state.analysis_result = detector.detect(fc)
+                    
                     if project['analysis_type'] == "表格分析":
                         st.switch_page("pages/05_表格分析详情.py")
                     elif project['analysis_type'] == "文本分析":

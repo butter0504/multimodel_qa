@@ -1,0 +1,40 @@
+data:
+  data_root: './data/'
+  dataset_name: null
+  label_column: null
+  file_encoding: 'utf-8'
+
+detection:
+  method: 'confident_learning'
+  threshold: 0.15
+  cross_validation_folds: 5
+  percentile_threshold: 85
+  n_estimators: 200
+  max_depth: 10
+  min_samples_split: 5
+  random_state: 42
+  blur_threshold: 50
+  noise_threshold: 25.0
+  min_resolution: 32
+  exposure_ratio_threshold: 0.5
+  contrast_threshold: 0.08
+  ks_significance: 0.05
+  js_threshold: 0.1
+  k_neighbors: 5
+  uncertainty_std_factor: 1.5
+
+feature_extraction:
+  image_model: 'resnet50'
+  text_model: 'tfidf'
+  tabular_method: 'standard_scaler'
+  batch_size: 32
+  max_features_tfidf: 10000
+  image_resize: 224
+
+report:
+  output_dir: './reports/'
+  include_visualization: true
+  include_embedding: false
+  include_suggestion: true
+  format: 'json'
+  sample_output_count: 5
