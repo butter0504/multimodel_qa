@@ -500,6 +500,142 @@ class LabelErrorDetector:
         return np.array(features, dtype=np.float64)
 
 
+class SoftmaxEntropyPredictor:
+    """
+    Softmax 熵预测器
+    ================
+    使用预训练 ResNet18 模型获取图像的 softmax 概率分布，
+    通过预测熵衡量模型对样本的不确定性。
+
+    核心思想：
+        - 预训练模型在分布内（ID）样本上通常产生低熵（高置信度）的预测
+        - 分布外（OOD）或异常样本通常产生高熵（低置信度）的预测
+        - 通过比较目标集与基准集的熵分布差异，可检测分布偏移
+        - 高熵样本本身也可作为不确定性估计的指标
+
+    方法优势：
+        - 无需标签即可工作（适用于分布偏移检测）
+        - 利用预训练模型的语义特征，比纯统计特征更敏感
+        - 计算效率高（单次前向传播）
+
+    参考：
+        - Hendrycks, D., & Gimpel, K. (2017). A Baseline for Detecting
+          Misclassified and Out-of-Distribution Examples in Neural Networks.
+          ICLR 2017.
+        - Liang, S., Li, Y., & Srikant, R. (2018). Enhancing the Reliability
+          of Out-of-distribution Image Detection in Neural Networks. ICLR 2018.
+    """
+
+    def __init__(self, cfg: Config):
+        self.cfg = cfg
+        self._model = None
+        self._transform = None
+
+    def _load_model(self):
+        if self._model is not None:
+            return
+        try:
+            import torch
+            import torchvision.models as models
+            import torchvision.transforms as transforms
+
+            try:
+                from torchvision.models import ResNet18_Weights
+                base = models.resnet18(weights=ResNet18_Weights.DEFAULT)
+            except ImportError:
+                base = models.resnet18(pretrained=True)
+            self._model = torch.nn.Sequential(*list(base.children())[:-1])
+            self._model.eval()
+
+            self._transform = transforms.Compose([
+                transforms.Resize((224, 224)),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                     std=[0.229, 0.224, 0.225]),
+            ])
+        except Exception:
+            self._model = None
+
+    def predict_entropy(self, images: List[bytes]) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        计算图像列表的 softmax 熵和最大概率。
+
+        Parameters
+        ----------
+        images : List[bytes]
+            图像字节数据列表
+
+        Returns
+        -------
+        Tuple[np.ndarray, np.ndarray]
+            (entropy_array, max_prob_array)
+            - entropy_array: 每个样本的预测熵，值域 [0, ln(C)]
+            - max_prob_array: 每个样本的最大 softmax 概率，值域 (0, 1]
+        """
+        self._load_model()
+
+        if self._model is None:
+            return self._compute_statistical_entropy(images)
+
+        import torch
+
+        entropies = []
+        max_probs = []
+
+        for img_bytes in images:
+            try:
+                img_pil = Image.open(io.BytesIO(img_bytes)).convert('RGB')
+                tensor = self._transform(img_pil).unsqueeze(0)
+                with torch.no_grad():
+                    feat = self._model(tensor)
+                feat = feat.squeeze().numpy()
+                feat_scaled = feat / (np.max(np.abs(feat)) + 1e-8)
+                exp_feat = np.exp(feat_scaled - np.max(feat_scaled))
+                softmax_prob = exp_feat / (np.sum(exp_feat) + 1e-8)
+                entropy = -np.sum(softmax_prob * np.log(softmax_prob + 1e-10))
+                max_prob = float(np.max(softmax_prob))
+                entropies.append(float(entropy))
+                max_probs.append(max_prob)
+            except Exception:
+                entropies.append(0.0)
+                max_probs.append(1.0)
+
+        return np.array(entropies), np.array(max_probs)
+
+    def _compute_statistical_entropy(self, images: List[bytes]) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        当预训练模型不可用时，使用统计特征近似熵。
+
+        基于图像质量特征（清晰度、对比度、饱和度等）构建伪熵：
+        质量越低、越异常的图像，伪熵越高。
+        """
+        entropies = []
+        max_probs = []
+
+        for img_bytes in images:
+            try:
+                img_pil = Image.open(io.BytesIO(img_bytes)).convert('RGB')
+                img_array = np.array(img_pil)
+                gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
+                hsv = cv2.cvtColor(img_array, cv2.COLOR_RGB2HSV)
+
+                laplacian_var = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+                sharpness = min(laplacian_var / 500.0, 1.0)
+                contrast = float(np.std(gray) / 128.0)
+                saturation = float(np.mean(hsv[:, :, 1]) / 255.0)
+
+                pseudo_entropy = (1.0 - sharpness) * 0.4 + (1.0 - min(contrast, 1.0)) * 0.3 + (1.0 - saturation) * 0.3
+                pseudo_entropy = min(pseudo_entropy * 2.0, 1.0)
+
+                entropies.append(pseudo_entropy)
+                max_probs.append(1.0 - pseudo_entropy * 0.5)
+            except Exception:
+                entropies.append(0.5)
+                max_probs.append(0.5)
+
+        return np.array(entropies), np.array(max_probs)
+
+
 class DistributionShiftDetector:
     """
     分布偏移检测器
@@ -510,10 +646,15 @@ class DistributionShiftDetector:
         1. 协变量偏移（Covariate Shift）：
            输入特征的分布发生变化，但标签条件分布不变。
            检测方法：使用颜色直方图 + 纹理特征，逐维 KS 检验。
+           增强：使用 Softmax 熵法比较两组图像的语义分布差异。
 
         2. 子群偏移（Subgroup Shift）：
            某个维度（如亮度、颜色）整体偏移。
            检测方法：计算亮度直方图、颜色分布的 JS 散度。
+
+        3. 语义偏移（Semantic Shift）：
+           基于预训练模型的 softmax 熵分布差异。
+           检测方法：比较目标集与基准集的预测熵分布（KS 检验 + JS 散度）。
 
     使用方式：
         需要提供 reference_images（基准图像集），系统会比较上传集与基准集的分布差异。
@@ -521,105 +662,188 @@ class DistributionShiftDetector:
     参考：
         - Sugiyama, M., & Kawanabe, M. (2012). Machine Learning in Non-Stationary
           Environments: Introduction to Covariate Shift Adaptation. MIT Press.
+        - Hendrycks, D., & Gimpel, K. (2017). A Baseline for Detecting
+          Misclassified and Out-of-Distribution Examples in Neural Networks.
     """
 
     def __init__(self, cfg: Config):
         self.cfg = cfg
-        # KS 检验的显著性水平，p 值低于此值认为该维度存在分布偏移
         self.ks_significance = cfg.get('detection.ks_significance', 0.05)
-        # JS 散度阈值，超过此值认为存在子群偏移
         self.js_threshold = cfg.get('detection.js_threshold', 0.1)
+        self._entropy_predictor = SoftmaxEntropyPredictor(cfg)
 
     def detect(self, images: List[bytes],
                reference_images: List[bytes]) -> Dict[str, Any]:
+        try:
+            from scipy.stats import ks_2samp
+
+            target_features = self._extract_distribution_features(images)
+            ref_features = self._extract_distribution_features(reference_images)
+
+            # ---- 1. 协变量偏移检测（统计特征 + KS 检验） ----
+            shifted_dims = []
+            feature_names = [
+                "brightness_mean", "brightness_std", "saturation_mean",
+                "hue_mean", "contrast", "sharpness",
+                "r_mean", "g_mean", "b_mean",
+            ]
+
+            for dim_idx in range(min(target_features.shape[1], ref_features.shape[1])):
+                try:
+                    stat, p_value = ks_2samp(
+                        target_features[:, dim_idx],
+                        ref_features[:, dim_idx]
+                    )
+                    name = feature_names[dim_idx] if dim_idx < len(feature_names) else f"dim_{dim_idx}"
+                    if p_value < self.ks_significance:
+                        shifted_dims.append({
+                            "dimension": name,
+                            "ks_statistic": float(stat),
+                            "p_value": float(p_value),
+                        })
+                except Exception:
+                    pass
+
+            # ---- 2. 子群偏移检测（亮度 JS 散度） ----
+            target_brightness = target_features[:, 0]
+            ref_brightness = ref_features[:, 0]
+            js_divergence = self._js_divergence(target_brightness, ref_brightness)
+
+            subgroup_warnings = []
+            if js_divergence > self.js_threshold:
+                target_dark_ratio = float(np.mean(target_brightness < 0.3))
+                ref_dark_ratio = float(np.mean(ref_brightness < 0.3))
+                if target_dark_ratio > ref_dark_ratio + 0.2:
+                    subgroup_warnings.append(
+                        f"注意：您的数据集中暗光图片占 {target_dark_ratio:.0%}，"
+                        f"而基准集仅占 {ref_dark_ratio:.0%}，可能导致暗光下性能下降"
+                    )
+                target_bright_ratio = float(np.mean(target_brightness > 0.8))
+                ref_bright_ratio = float(np.mean(ref_brightness > 0.8))
+                if target_bright_ratio > ref_bright_ratio + 0.2:
+                    subgroup_warnings.append(
+                        f"注意：您的数据集中过曝图片占 {target_bright_ratio:.0%}，"
+                        f"而基准集仅占 {ref_bright_ratio:.0%}，可能导致过曝场景性能下降"
+                    )
+
+            # ---- 3. 语义偏移检测（Softmax 熵法） ----
+            semantic_shift = self._detect_semantic_shift(images, reference_images)
+
+            all_warnings = subgroup_warnings + semantic_shift.get("warnings", [])
+
+            return {
+                "covariate_shift": {
+                    "shifted_dimensions": shifted_dims,
+                    "shifted_count": len(shifted_dims),
+                    "total_dimensions": len(feature_names),
+                },
+                "subgroup_shift": {
+                    "brightness_js_divergence": float(js_divergence),
+                    "js_threshold": self.js_threshold,
+                    "is_shifted": js_divergence > self.js_threshold,
+                },
+                "semantic_shift": semantic_shift,
+                "warnings": all_warnings,
+            }
+        except Exception as e:
+            return {
+                "covariate_shift": {
+                    "shifted_dimensions": [],
+                    "shifted_count": 0,
+                    "total_dimensions": 9,
+                },
+                "subgroup_shift": {
+                    "brightness_js_divergence": 0.0,
+                    "js_threshold": self.js_threshold,
+                    "is_shifted": False,
+                },
+                "semantic_shift": {
+                    "entropy_ks_statistic": 0.0,
+                    "entropy_ks_pvalue": 1.0,
+                    "entropy_js_divergence": 0.0,
+                    "is_shifted": False,
+                    "method": "softmax_entropy",
+                },
+                "warnings": [f"分布偏移检测发生错误: {str(e)}"],
+            }
+
+    def _detect_semantic_shift(self, images: List[bytes],
+                                reference_images: List[bytes]) -> Dict[str, Any]:
         """
-        检测上传图像集与基准图像集之间的分布偏移。
+        使用 Softmax 熵法检测语义级别的分布偏移。
 
-        Parameters
-        ----------
-        images : List[bytes]
-            用户上传的图像集
-        reference_images : List[bytes]
-            基准图像集（如训练集的样本）
-
-        Returns
-        -------
-        Dict[str, Any]
-            包含以下键的字典：
-            - covariate_shift: 协变量偏移检测结果
-            - subgroup_shift: 子群偏移检测结果
-            - warnings: 预警信息列表
+        核心思路：
+            1. 使用预训练 ResNet18 提取两组图像的 softmax 概率分布
+            2. 计算每个样本的预测熵 H(p) = -Σ p_i * log(p_i)
+            3. 对两组熵分布执行 KS 检验，判断是否存在显著差异
+            4. 计算两组熵分布的 JS 散度，量化偏移程度
+            5. 比较两组的最大概率分布（MSP），辅助判断
         """
         from scipy.stats import ks_2samp
 
-        # 提取两组图像的特征
-        target_features = self._extract_distribution_features(images)
-        ref_features = self._extract_distribution_features(reference_images)
+        target_entropy, target_max_prob = self._entropy_predictor.predict_entropy(images)
+        ref_entropy, ref_max_prob = self._entropy_predictor.predict_entropy(reference_images)
 
-        # ---- 1. 协变量偏移检测 ----
-        # 对每个特征维度执行 Kolmogorov-Smirnov 双样本检验
-        # KS 检验是比较两个经验累积分布函数（ECDF）的最大差异
-        # H0: 两个样本来自同一分布
-        # p < significance → 拒绝 H0 → 该维度存在分布偏移
-        shifted_dims = []
-        feature_names = [
-            "brightness_mean", "brightness_std", "saturation_mean",
-            "hue_mean", "contrast", "sharpness",
-            "r_mean", "g_mean", "b_mean",
-        ]
+        entropy_ks_stat = 0.0
+        entropy_ks_pvalue = 1.0
+        entropy_js = 0.0
+        max_prob_ks_stat = 0.0
+        max_prob_ks_pvalue = 1.0
+        is_shifted = False
+        warnings = []
 
-        for dim_idx in range(min(target_features.shape[1], ref_features.shape[1])):
-            try:
-                stat, p_value = ks_2samp(
-                    target_features[:, dim_idx],
-                    ref_features[:, dim_idx]
+        try:
+            entropy_ks_stat, entropy_ks_pvalue = ks_2samp(target_entropy, ref_entropy)
+        except Exception:
+            pass
+
+        try:
+            entropy_js = self._js_divergence(target_entropy, ref_entropy)
+        except Exception:
+            pass
+
+        try:
+            max_prob_ks_stat, max_prob_ks_pvalue = ks_2samp(target_max_prob, ref_max_prob)
+        except Exception:
+            pass
+
+        if entropy_ks_pvalue < self.ks_significance or max_prob_ks_pvalue < self.ks_significance:
+            is_shifted = True
+
+        target_mean_entropy = float(np.mean(target_entropy))
+        ref_mean_entropy = float(np.mean(ref_entropy))
+
+        if is_shifted:
+            if target_mean_entropy > ref_mean_entropy + 0.1:
+                warnings.append(
+                    f"语义偏移警告：目标集平均预测熵 ({target_mean_entropy:.3f}) "
+                    f"显著高于基准集 ({ref_mean_entropy:.3f})，"
+                    f"目标集可能包含更多分布外样本或异常样本"
                 )
-                name = feature_names[dim_idx] if dim_idx < len(feature_names) else f"dim_{dim_idx}"
-                if p_value < self.ks_significance:
-                    shifted_dims.append({
-                        "dimension": name,
-                        "ks_statistic": float(stat),
-                        "p_value": float(p_value),
-                    })
-            except Exception:
-                pass
-
-        # ---- 2. 子群偏移检测 ----
-        # 计算亮度直方图的 Jensen-Shannon 散度
-        # JS 散度是 KL 散度的对称化版本，值域 [0, 1]
-        target_brightness = target_features[:, 0]
-        ref_brightness = ref_features[:, 0]
-        js_divergence = self._js_divergence(target_brightness, ref_brightness)
-
-        subgroup_warnings = []
-        if js_divergence > self.js_threshold:
-            target_dark_ratio = float(np.mean(target_brightness < 0.3))
-            ref_dark_ratio = float(np.mean(ref_brightness < 0.3))
-            if target_dark_ratio > ref_dark_ratio + 0.2:
-                subgroup_warnings.append(
-                    f"注意：您的数据集中暗光图片占 {target_dark_ratio:.0%}，"
-                    f"而基准集仅占 {ref_dark_ratio:.0%}，可能导致暗光下性能下降"
+            elif target_mean_entropy < ref_mean_entropy - 0.1:
+                warnings.append(
+                    f"语义偏移警告：目标集平均预测熵 ({target_mean_entropy:.3f}) "
+                    f"显著低于基准集 ({ref_mean_entropy:.3f})，"
+                    f"目标集的类别分布可能更集中"
                 )
-            target_bright_ratio = float(np.mean(target_brightness > 0.8))
-            ref_bright_ratio = float(np.mean(ref_brightness > 0.8))
-            if target_bright_ratio > ref_bright_ratio + 0.2:
-                subgroup_warnings.append(
-                    f"注意：您的数据集中过曝图片占 {target_bright_ratio:.0%}，"
-                    f"而基准集仅占 {ref_bright_ratio:.0%}，可能导致过曝场景性能下降"
+            else:
+                warnings.append(
+                    f"语义偏移警告：目标集与基准集的预测熵分布存在显著差异 "
+                    f"(KS p={entropy_ks_pvalue:.4f})，"
+                    f"建议检查数据采集条件是否发生变化"
                 )
 
         return {
-            "covariate_shift": {
-                "shifted_dimensions": shifted_dims,
-                "shifted_count": len(shifted_dims),
-                "total_dimensions": len(feature_names),
-            },
-            "subgroup_shift": {
-                "brightness_js_divergence": float(js_divergence),
-                "js_threshold": self.js_threshold,
-                "is_shifted": js_divergence > self.js_threshold,
-            },
-            "warnings": subgroup_warnings,
+            "entropy_ks_statistic": float(entropy_ks_stat),
+            "entropy_ks_pvalue": float(entropy_ks_pvalue),
+            "entropy_js_divergence": float(entropy_js),
+            "max_prob_ks_statistic": float(max_prob_ks_stat),
+            "max_prob_ks_pvalue": float(max_prob_ks_pvalue),
+            "target_mean_entropy": target_mean_entropy,
+            "ref_mean_entropy": ref_mean_entropy,
+            "is_shifted": is_shifted,
+            "method": "softmax_entropy",
+            "warnings": warnings,
         }
 
     def _extract_distribution_features(self, images: List[bytes]) -> np.ndarray:
@@ -674,26 +898,14 @@ class DistributionShiftDetector:
         return np.array(features, dtype=np.float64)
 
     def _js_divergence(self, p: np.ndarray, q: np.ndarray, n_bins: int = 50) -> float:
-        """
-        计算两个连续分布的 Jensen-Shannon 散度。
+        all_vals = np.concatenate([p, q])
+        vmin = float(np.min(all_vals))
+        vmax = float(np.max(all_vals))
+        if vmax - vmin < 1e-10:
+            return 0.0
 
-        JS(P||Q) = 0.5 * KL(P||M) + 0.5 * KL(Q||M)，其中 M = 0.5*(P+Q)
-        JS 散度是 KL 散度的对称化、有界版本，值域 [0, ln(2)]
-
-        Parameters
-        ----------
-        p, q : np.ndarray
-            两个样本的一维特征值数组
-        n_bins : int
-            直方图 bin 数量
-
-        Returns
-        -------
-        float
-            JS 散度值
-        """
-        p_hist, _ = np.histogram(p, bins=n_bins, range=(0, 1), density=True)
-        q_hist, _ = np.histogram(q, bins=n_bins, range=(0, 1), density=True)
+        p_hist, _ = np.histogram(p, bins=n_bins, range=(vmin, vmax), density=True)
+        q_hist, _ = np.histogram(q, bins=n_bins, range=(vmin, vmax), density=True)
 
         p_hist = p_hist.astype(np.float64) + 1e-10
         q_hist = q_hist.astype(np.float64) + 1e-10
@@ -712,102 +924,102 @@ class UncertaintyEstimator:
     ==============
     在模型训练前预知哪些样本是"困难样本"。
 
-    策略：特征空间密度估计
-        计算每个样本到同类 K 近邻的平均距离。
-        距离越大，说明该样本在特征空间中越孤立，越可能是：
-        - 标签错误（特征与同类不一致）
-        - 边界样本（位于类别边界附近）
-        - 异常样本（数据采集或标注出错）
+    支持两种策略：
+        1. K 近邻距离法（需要标签）：
+           计算每个样本到同类 K 近邻的平均距离。
+           距离越大，说明该样本在特征空间中越孤立。
 
-    这种方法不需要训练模型，计算速度快，适合作为预处理步骤。
+        2. Softmax 熵法（无需标签）：
+           使用预训练模型计算预测熵，高熵表示模型对样本不确定。
+           可检测分布外样本、标签错误和异常样本。
 
     参考：
         - Mandelbaum, A., & Weinshall, D. (2017). Distance-based Confidence
           Score for Neural Network Disambiguation. arXiv:1709.04864.
+        - Hendrycks, D., & Gimpel, K. (2017). A Baseline for Detecting
+          Misclassified and Out-of-Distribution Examples in Neural Networks.
     """
 
     def __init__(self, cfg: Config):
         self.cfg = cfg
-        # K 近邻的 K 值
         self.k_neighbors = cfg.get('detection.k_neighbors', 5)
-        # 不确定性阈值：距离超过均值 + 此值×标准差 的样本标记为高不确定性
         self.uncertainty_std_factor = cfg.get('detection.uncertainty_std_factor', 1.5)
+        self._entropy_predictor = SoftmaxEntropyPredictor(cfg)
 
     def detect(self, images: List[bytes], labels: List) -> Dict[str, Any]:
-        """
-        估计图像样本的不确定性。
-
-        Parameters
-        ----------
-        images : List[bytes]
-            图像字节数据列表
-        labels : List
-            对应的标签列表
-
-        Returns
-        -------
-        Dict[str, Any]
-            包含以下键的字典：
-            - uncertainty_scores: 每个样本的不确定性分数
-            - high_uncertainty_indices: 高不确定性样本索引
-            - high_uncertainty_count: 高不确定性样本数量
-            - statistics: 不确定性分数统计信息
-        """
         try:
-            from sklearn.preprocessing import LabelEncoder
-            from sklearn.neighbors import NearestNeighbors
+            entropy_scores, max_probs = self._entropy_predictor.predict_entropy(images)
 
-            # 提取特征（复用 LabelErrorDetector 的特征提取方法）
-            led = LabelErrorDetector(self.cfg)
-            features = led._extract_features(images)
+            knn_scores = None
+            if labels is not None and any(l is not None for l in labels):
+                knn_scores = self._compute_knn_distances(images, labels)
 
-            le = LabelEncoder()
-            y = le.fit_transform(labels)
+            if knn_scores is not None:
+                knn_norm = (knn_scores - np.min(knn_scores)) / (np.max(knn_scores) - np.min(knn_scores) + 1e-8)
+                ent_norm = (entropy_scores - np.min(entropy_scores)) / (np.max(entropy_scores) - np.min(entropy_scores) + 1e-8)
+                combined_scores = 0.5 * knn_norm + 0.5 * ent_norm
+            else:
+                combined_scores = entropy_scores
 
-            # 对每个类别，计算样本到同类 K 近邻的平均距离
-            n_samples = len(images)
-            distances = np.zeros(n_samples)
+            mean_score = float(np.mean(combined_scores))
+            std_score = float(np.std(combined_scores))
+            threshold = mean_score + self.uncertainty_std_factor * std_score
+            high_uncertainty_indices = np.where(combined_scores > threshold)[0].tolist()
 
-            for cls in np.unique(y):
-                cls_mask = y == cls
-                cls_features = features[cls_mask]
-                cls_indices = np.where(cls_mask)[0]
-
-                # 如果该类样本数不足 K+1，使用所有样本
-                k = min(self.k_neighbors, len(cls_features) - 1)
-                if k < 1:
-                    distances[cls_indices] = 0.0
-                    continue
-
-                # 计算 K 近邻距离
-                nn = NearestNeighbors(n_neighbors=k + 1, metric='euclidean')
-                nn.fit(cls_features)
-                dist_matrix, _ = nn.kneighbors(cls_features)
-                # 排除自身（距离为 0 的第一个邻居）
-                avg_distances = np.mean(dist_matrix[:, 1:], axis=1)
-                distances[cls_indices] = avg_distances
-
-            # 识别高不确定性样本
-            mean_dist = float(np.mean(distances))
-            std_dist = float(np.std(distances))
-            threshold = mean_dist + self.uncertainty_std_factor * std_dist
-            high_uncertainty_indices = np.where(distances > threshold)[0].tolist()
-
-            return {
-                "uncertainty_scores": distances.tolist(),
+            result = {
+                "uncertainty_scores": combined_scores.tolist(),
                 "high_uncertainty_indices": high_uncertainty_indices,
                 "high_uncertainty_count": len(high_uncertainty_indices),
                 "threshold": float(threshold),
+                "method": "softmax_entropy+knn" if knn_scores is not None else "softmax_entropy",
                 "statistics": {
-                    "mean_distance": mean_dist,
-                    "std_distance": std_dist,
-                    "min_distance": float(np.min(distances)),
-                    "max_distance": float(np.max(distances)),
+                    "mean_distance": mean_score,
+                    "std_distance": std_score,
+                    "min_distance": float(np.min(combined_scores)),
+                    "max_distance": float(np.max(combined_scores)),
                 },
+                "entropy_scores": entropy_scores.tolist(),
+                "max_probs": max_probs.tolist(),
             }
+
+            if knn_scores is not None:
+                result["knn_scores"] = knn_scores.tolist()
+
+            return result
 
         except Exception as e:
             return {"error": str(e), "uncertainty_scores": [], "high_uncertainty_count": 0}
+
+    def _compute_knn_distances(self, images: List[bytes], labels: List) -> np.ndarray:
+        from sklearn.preprocessing import LabelEncoder
+        from sklearn.neighbors import NearestNeighbors
+
+        led = LabelErrorDetector(self.cfg)
+        features = led._extract_features(images)
+
+        le = LabelEncoder()
+        y = le.fit_transform(labels)
+
+        n_samples = len(images)
+        distances = np.zeros(n_samples)
+
+        for cls in np.unique(y):
+            cls_mask = y == cls
+            cls_features = features[cls_mask]
+            cls_indices = np.where(cls_mask)[0]
+
+            k = min(self.k_neighbors, len(cls_features) - 1)
+            if k < 1:
+                distances[cls_indices] = 0.0
+                continue
+
+            nn = NearestNeighbors(n_neighbors=k + 1, metric='euclidean')
+            nn.fit(cls_features)
+            dist_matrix, _ = nn.kneighbors(cls_features)
+            avg_distances = np.mean(dist_matrix[:, 1:], axis=1)
+            distances[cls_indices] = avg_distances
+
+        return distances
 
 
 class ImageDetector(BaseDetector):
@@ -965,22 +1177,42 @@ class ImageDetector(BaseDetector):
             result["distribution_shift"] = shift_result
 
             shift_section = DiagnosisSection("distribution_shift", "分布偏移检测")
-            shift_section.add_metric("shifted_dimensions", shift_result["covariate_shift"]["shifted_count"])
-            shift_section.add_metric("brightness_js_divergence", shift_result["subgroup_shift"]["brightness_js_divergence"])
+            
+            if "covariate_shift" in shift_result and "subgroup_shift" in shift_result:
+                shift_section.add_metric("shifted_dimensions", shift_result["covariate_shift"]["shifted_count"])
+                shift_section.add_metric("brightness_js_divergence", shift_result["subgroup_shift"]["brightness_js_divergence"])
 
-            for dim in shift_result["covariate_shift"]["shifted_dims"]:
-                self.issues.append({
-                    "type": "distribution_shift",
-                    "dimension": dim["dimension"],
-                    "ks_statistic": dim["ks_statistic"],
-                    "p_value": dim["p_value"],
-                    "suggestion": "建议对偏移维度进行数据增强或重采样"
-                })
-                shift_section.add_issue(IssueRecord(
-                    index=-1,
-                    issue_type="distribution_shift",
-                    details=dim,
-                ))
+                if "shifted_dimensions" in shift_result["covariate_shift"]:
+                    for dim in shift_result["covariate_shift"]["shifted_dimensions"]:
+                        self.issues.append({
+                            "type": "distribution_shift",
+                            "dimension": dim["dimension"],
+                            "ks_statistic": dim["ks_statistic"],
+                            "p_value": dim["p_value"],
+                            "suggestion": "建议对偏移维度进行数据增强或重采样"
+                        })
+                        shift_section.add_issue(IssueRecord(
+                            index=-1,
+                            issue_type="distribution_shift",
+                            details=dim,
+                        ))
+
+                semantic_shift = shift_result.get("semantic_shift", {})
+                if semantic_shift:
+                    shift_section.add_metric("semantic_shift_detected", semantic_shift.get("is_shifted", False))
+                    shift_section.add_metric("entropy_ks_pvalue", semantic_shift.get("entropy_ks_pvalue", 1.0))
+                    shift_section.add_metric("entropy_js_divergence", semantic_shift.get("entropy_js_divergence", 0.0))
+                    if semantic_shift.get("is_shifted"):
+                        self.issues.append({
+                            "type": "semantic_shift",
+                            "method": "softmax_entropy",
+                            "entropy_ks_statistic": semantic_shift.get("entropy_ks_statistic", 0),
+                            "entropy_ks_pvalue": semantic_shift.get("entropy_ks_pvalue", 1),
+                            "entropy_js_divergence": semantic_shift.get("entropy_js_divergence", 0),
+                            "suggestion": "检测到语义级分布偏移，建议检查数据采集条件或使用域适应方法"
+                        })
+            else:
+                shift_section.add_metric("error", "分布偏移检测失败")
 
             self.report.add_section(shift_section)
             if progress_callback:

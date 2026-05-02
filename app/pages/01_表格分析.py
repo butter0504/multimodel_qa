@@ -144,7 +144,7 @@ project_name = st.text_input("项目名称", placeholder="输入项目名称")
 
 # 开始分析按钮
 if uploaded_file and project_name:
-    if st.button("开始分析", use_container_width=True):
+    if st.button("开始分析", width='stretch'):
         with st.spinner("正在分析数据..."):
             if uploaded_file.name.endswith('.csv'):
                 df = pd.read_csv(uploaded_file)

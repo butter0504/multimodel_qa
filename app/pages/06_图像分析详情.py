@@ -43,8 +43,7 @@ st.markdown("""
 }
 body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; color: var(--text-primary); line-height: 1.6; background-color: var(--bg-light); }
 .page-title { font-size: 2rem; font-weight: 700; background: linear-gradient(135deg, var(--primary-color), var(--primary-light)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; margin-bottom: 1.5rem; }
-.card { background: var(--bg-white); border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); padding: 20px; margin-bottom: 20px; border: 1px solid var(--border-color); transition: all 0.3s ease; }
-.card:hover { transform: translateY(-2px); box-shadow: 0 4px 12px rgba(0,0,0,0.12); }
+.card { display: none; }
 .metric-card { background: var(--bg-light); border-radius: 8px; padding: 15px; text-align: center; border-left: 4px solid var(--primary-color); }
 .metric-card.success { border-left-color: var(--success-color); }
 .metric-card.warning { border-left-color: var(--warning-color); }
@@ -136,7 +135,7 @@ with tabs[tab_idx]:
                     row["模式"] = meta.get("mode", "?")
                 meta_rows.append(row)
             if meta_rows:
-                st.dataframe(pd.DataFrame(meta_rows), use_container_width=True)
+                st.dataframe(pd.DataFrame(meta_rows), width='stretch')
                 if len(bq["image_metadata"]) > 20:
                     st.info(f"仅显示前 20 张，共 {len(bq['image_metadata'])} 张图像")
 
@@ -145,7 +144,7 @@ with tabs[tab_idx]:
             score_df = pd.DataFrame({"质量分数": bq["quality_scores"]})
             fig = px.histogram(score_df, x="质量分数", nbins=20, title="图像质量分数分布")
             fig.update_layout(xaxis_title="质量分数", yaxis_title="图像数量", height=350)
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width='stretch')
 
 if "basic_quality" in modules_run and tab_idx < len(tabs):
     with tabs[tab_idx]:
@@ -226,7 +225,7 @@ if "label_error" in modules_run and tab_idx < len(tabs):
                 fig = px.histogram(lq_df, x="质量分数", nbins=20, title="标签质量分数分布")
                 fig.add_vline(x=0.15, line_dash="dash", line_color="red", annotation_text="阈值")
                 fig.update_layout(height=350)
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, width='stretch')
 
             if le.get("error_indices"):
                 st.markdown("<h3>Top 可疑样本</h3>", unsafe_allow_html=True)
@@ -260,7 +259,7 @@ if "label_error" in modules_run and tab_idx < len(tabs):
                     })
                 
                 error_data.sort(key=lambda x: float(x["质量分数"]))
-                st.dataframe(pd.DataFrame(error_data[:20]), use_container_width=True)
+                st.dataframe(pd.DataFrame(error_data[:20]), width='stretch')
 
                 st.markdown("<h3>可疑样本缩略图</h3>", unsafe_allow_html=True)
                 cols = st.columns(5)
@@ -301,8 +300,9 @@ if "distribution_shift" in modules_run and tab_idx < len(tabs):
         if ds:
             cs = ds.get("covariate_shift", {})
             ss = ds.get("subgroup_shift", {})
+            sem = ds.get("semantic_shift", {})
 
-            col1, col2 = st.columns(2)
+            col1, col2, col3 = st.columns(3)
             with col1:
                 st.markdown('<div class="metric-card warning">', unsafe_allow_html=True)
                 st.metric("偏移维度数", cs.get("shifted_count", 0))
@@ -313,17 +313,40 @@ if "distribution_shift" in modules_run and tab_idx < len(tabs):
                 st.markdown(f'<div class="metric-card {color}">', unsafe_allow_html=True)
                 st.metric("亮度JS散度", f"{js_val:.4f}")
                 st.markdown('</div>', unsafe_allow_html=True)
+            with col3:
+                if sem:
+                    sem_color = "error" if sem.get("is_shifted") else "success"
+                    st.markdown(f'<div class="metric-card {sem_color}">', unsafe_allow_html=True)
+                    st.metric("语义偏移(熵法)", "检测到偏移" if sem.get("is_shifted") else "无偏移")
+                    st.markdown('</div>', unsafe_allow_html=True)
 
             if cs.get("shifted_dimensions"):
                 st.markdown("<h3>偏移维度详情</h3>", unsafe_allow_html=True)
                 shift_df = pd.DataFrame(cs["shifted_dimensions"])
-                st.dataframe(shift_df, use_container_width=True)
+                st.dataframe(shift_df, width='stretch')
 
                 dims = [d["dimension"] for d in cs["shifted_dimensions"]]
                 stats = [d["ks_statistic"] for d in cs["shifted_dimensions"]]
                 fig = go.Figure(data=[go.Bar(x=dims, y=stats)])
                 fig.update_layout(title="各维度 KS 统计量", xaxis_title="维度", yaxis_title="KS 统计量", height=350)
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, width='stretch')
+
+            if sem:
+                st.markdown("<h3>语义偏移检测（Softmax 熵法）</h3>", unsafe_allow_html=True)
+                sem_col1, sem_col2 = st.columns(2)
+                with sem_col1:
+                    st.markdown("**熵分布 KS 检验**")
+                    st.write(f"KS 统计量: {sem.get('entropy_ks_statistic', 0):.4f}")
+                    st.write(f"p 值: {sem.get('entropy_ks_pvalue', 1):.4f}")
+                    st.write(f"熵 JS 散度: {sem.get('entropy_js_divergence', 0):.4f}")
+                with sem_col2:
+                    st.markdown("**最大概率 KS 检验**")
+                    st.write(f"KS 统计量: {sem.get('max_prob_ks_statistic', 0):.4f}")
+                    st.write(f"p 值: {sem.get('max_prob_ks_pvalue', 1):.4f}")
+                    st.write(f"目标集平均熵: {sem.get('target_mean_entropy', 0):.4f}")
+                    st.write(f"基准集平均熵: {sem.get('ref_mean_entropy', 0):.4f}")
+
+                st.markdown(f"**检测方法**: {sem.get('method', 'softmax_entropy')}")
 
             warnings = ds.get("warnings", [])
             for w in warnings:
@@ -338,6 +361,14 @@ if "uncertainty" in modules_run and tab_idx < len(tabs):
 
         ue = result.get("uncertainty", {})
         if ue and "error" not in ue:
+            method = ue.get("method", "unknown")
+            method_names = {
+                "softmax_entropy": "Softmax 熵法",
+                "softmax_entropy+knn": "Softmax 熵法 + K近邻距离",
+                "knn": "K近邻距离法",
+            }
+            st.caption(f"检测方法: {method_names.get(method, method)}")
+
             col1, col2 = st.columns(2)
             with col1:
                 st.markdown('<div class="metric-card warning">', unsafe_allow_html=True)
@@ -346,7 +377,7 @@ if "uncertainty" in modules_run and tab_idx < len(tabs):
             with col2:
                 stats = ue.get("statistics", {})
                 st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-                st.metric("平均距离", f"{stats.get('mean_distance', 0):.2f}")
+                st.metric("平均不确定性", f"{stats.get('mean_distance', 0):.4f}")
                 st.markdown('</div>', unsafe_allow_html=True)
 
             if ue.get("uncertainty_scores"):
@@ -357,7 +388,7 @@ if "uncertainty" in modules_run and tab_idx < len(tabs):
                 fig = px.scatter(unc_df, x="样本序号", y="不确定性", title="不确定性分数分布")
                 fig.add_hline(y=threshold, line_dash="dash", line_color="red", annotation_text="阈值")
                 fig.update_layout(height=400)
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, width='stretch')
 
             if ue.get("high_uncertainty_indices"):
                 st.markdown("<h3>高不确定性样本缩略图</h3>", unsafe_allow_html=True)
@@ -386,6 +417,7 @@ if tab_idx < len(tabs):
                 "noisy_image": "噪声", "small_image": "低分辨率", "low_contrast": "低对比度",
                 "corrupted_image": "损坏", "label_error": "标签错误",
                 "distribution_shift": "分布偏移", "high_uncertainty": "高不确定性",
+                "semantic_shift": "语义偏移",
             }
             rows = []
             for issue in issues:
@@ -399,7 +431,7 @@ if tab_idx < len(tabs):
                         row[k] = v
                 rows.append(row)
             issues_df = pd.DataFrame(rows)
-            st.dataframe(issues_df, use_container_width=True)
+            st.dataframe(issues_df, width='stretch')
 
             csv = issues_df.to_csv(index=False)
             st.download_button("📥 导出问题列表 (CSV)", data=csv,
@@ -413,31 +445,27 @@ if tab_idx < len(tabs):
         st.markdown("<h2>原始分析结果</h2>", unsafe_allow_html=True)
         st.json(convert_to_serializable(result))
 
-st.markdown("<h2 style='margin-top: 30px;'>导出报告</h2>", unsafe_allow_html=True)
-with st.container():
-    st.markdown('<div class="card">', unsafe_allow_html=True)
+st.markdown("**导出报告**")
 
-    report_data = {k: v for k, v in result.items() if k != "diagnosis_report"}
-    report_data = convert_to_serializable(report_data)
-    report_json = json.dumps(report_data, indent=2, ensure_ascii=False)
+report_data = {k: v for k, v in result.items() if k != "diagnosis_report"}
+report_data = convert_to_serializable(report_data)
+report_json = json.dumps(report_data, indent=2, ensure_ascii=False)
+st.download_button(
+    label="📥 下载 JSON 报告",
+    data=report_json,
+    file_name=f"image_report_{project.get('file_name', 'unknown')}.json",
+    mime="application/json"
+)
+
+if result.get("issues"):
+    issues_df_export = pd.DataFrame(result["issues"])
+    csv_export = issues_df_export.to_csv(index=False)
     st.download_button(
-        label="📥 下载 JSON 报告",
-        data=report_json,
-        file_name=f"image_report_{project.get('file_name', 'unknown')}.json",
-        mime="application/json"
+        label="📥 下载问题清单 (CSV)",
+        data=csv_export,
+        file_name=f"image_issues_{project.get('file_name', 'unknown')}.csv",
+        mime="text/csv"
     )
-
-    if result.get("issues"):
-        issues_df_export = pd.DataFrame(result["issues"])
-        csv_export = issues_df_export.to_csv(index=False)
-        st.download_button(
-            label="📥 下载问题清单 (CSV)",
-            data=csv_export,
-            file_name=f"image_issues_{project.get('file_name', 'unknown')}.csv",
-            mime="text/csv"
-        )
-
-    st.markdown('</div>', unsafe_allow_html=True)
 
 st.markdown("""
 <div style="margin-top: 50px; text-align: center; color: var(--text-secondary); padding: 2rem 0;">

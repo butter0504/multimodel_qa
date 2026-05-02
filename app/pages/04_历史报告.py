@@ -168,9 +168,35 @@ if projects:
             col1, col2 = st.columns(2)
             with col1:
                 if st.button("查看详情", key=f"view_{i}"):
+                    st.session_state.current_project = project
                     if result:
                         st.session_state.analysis_result = result
-                    st.session_state.current_project = project
+                    else:
+                        fc = project.get('file_content')
+                        if fc is not None:
+                            from pathlib import Path
+                            import sys
+                            sys.path.insert(0, str(Path(__file__).parent.parent))
+                            with st.spinner("正在重新执行检测..."):
+                                if analysis_type == "图像分析":
+                                    from modules.image_detector import ImageDetector
+                                    from modules.config import Config
+                                    cfg = Config.fromfile(str(Path(__file__).parent.parent / 'config.yaml'))
+                                    detector = ImageDetector(cfg)
+                                    st.session_state.analysis_result = detector.detect(fc, modules=['basic_quality'])
+                                elif analysis_type == "表格分析":
+                                    from modules.table_detector import TableDetector
+                                    from modules.config import Config
+                                    cfg = Config.fromfile(str(Path(__file__).parent.parent / 'config.yaml'))
+                                    detector = TableDetector(cfg)
+                                    lc = project.get('label_col')
+                                    st.session_state.analysis_result = detector.detect(fc, label_col=lc)
+                                elif analysis_type == "文本分析":
+                                    from modules.text_detector import TextDetector
+                                    from modules.config import Config
+                                    cfg = Config.fromfile(str(Path(__file__).parent.parent / 'config.yaml'))
+                                    detector = TextDetector(cfg)
+                                    st.session_state.analysis_result = detector.detect(fc)
                     if analysis_type == "表格分析":
                         st.switch_page("pages/05_表格分析详情.py")
                     elif analysis_type == "文本分析":
@@ -178,14 +204,14 @@ if projects:
                     elif analysis_type == "图像分析":
                         st.switch_page("pages/06_图像分析详情.py")
             with col2:
-                if st.button("重新分析", key=f"reanalyze_{i}"):
-                    st.session_state.current_project = project
-                    if analysis_type == "表格分析":
-                        st.switch_page("pages/01_表格分析.py")
-                    elif analysis_type == "文本分析":
-                        st.switch_page("pages/02_文本分析.py")
-                    elif analysis_type == "图像分析":
-                        st.switch_page("pages/03_图像分析.py")
+                is_latest = len(st.session_state.get("projects", [])) > 0 and project is st.session_state["projects"][-1]
+                if is_latest:
+                    if st.button("重新分析", key=f"reanalyze_{i}"):
+                        st.session_state.current_project = project
+                        st.session_state.reanalyze_pending = True
+                        st.switch_page("main.py")
+                else:
+                    st.button("重新分析", key=f"reanalyze_{i}", disabled=True, help="仅最近一次分析支持重新分析")
 else:
     st.info("暂无历史分析记录")
 

@@ -313,9 +313,65 @@ if "analysis_history" not in st.session_state:
 if "recent_analyses" not in st.session_state:
     st.session_state.recent_analyses = []
 
+if "reanalyze_pending" not in st.session_state:
+    st.session_state.reanalyze_pending = False
+
+# 处理重新分析请求
+if st.session_state.reanalyze_pending and st.session_state.get("current_project"):
+    project = st.session_state.current_project
+    fc = project.get('file_content')
+    at = project.get('analysis_type', '')
+    pn = project.get('name', '')
+    fn = project.get('file_name', '')
+
+    st.info(f"🔄 重新分析项目: **{pn}** ({fn})")
+    st.markdown(f"**分析类型**: {at}")
+
+    if st.button("确认重新分析", width='stretch'):
+        st.session_state.reanalyze_pending = False
+        import time
+        import sys
+        sys.path.insert(0, str(Path(__file__).parent.parent))
+
+        current_time = time.strftime("%Y-%m-%d %H:%M:%S")
+
+        if fc is not None:
+            with st.spinner("正在重新执行检测..."):
+                if at == "图像分析":
+                    from modules.image_detector import ImageDetector
+                    from modules.config import Config
+                    cfg = Config.fromfile(str(Path(__file__).parent.parent / 'config.yaml'))
+                    detector = ImageDetector(cfg)
+                    st.session_state.analysis_result = detector.detect(fc, modules=['basic_quality'])
+                    st.switch_page("pages/06_图像分析详情.py")
+                elif at == "表格分析":
+                    from modules.table_detector import TableDetector
+                    from modules.config import Config
+                    cfg = Config.fromfile(str(Path(__file__).parent.parent / 'config.yaml'))
+                    detector = TableDetector(cfg)
+                    lc = project.get('label_col')
+                    st.session_state.analysis_result = detector.detect(fc, label_col=lc)
+                    st.switch_page("pages/05_表格分析详情.py")
+                elif at == "文本分析":
+                    from modules.text_detector import TextDetector
+                    from modules.config import Config
+                    cfg = Config.fromfile(str(Path(__file__).parent.parent / 'config.yaml'))
+                    detector = TextDetector(cfg)
+                    st.session_state.analysis_result = detector.detect(fc)
+                    st.switch_page("pages/07_文本分析详情.py")
+        else:
+            st.error("无法重新分析：文件内容不可用（可能已过期）")
+            st.session_state.reanalyze_pending = False
+
+    if st.button("取消", width='stretch'):
+        st.session_state.reanalyze_pending = False
+        st.rerun()
+
+    st.stop()
+
 # 侧边栏 - 只保留返回首页按钮
 with st.sidebar:
-    if st.button("返回首页", use_container_width=True):
+    if st.button("返回首页", width='stretch'):
         st.session_state.page = "首页"
         st.rerun()
 
@@ -326,7 +382,7 @@ st.markdown('<h1 class="main-title">基于置信学习的多模态数据质量�
 st.markdown('<p class="subtitle">快速检测表格、文本、图像数据的质量问题</p>', unsafe_allow_html=True)
 
 # 历史报告快捷入口
-if st.button("查看历史报告", use_container_width=True):
+if st.button("查看历史报告", width='stretch'):
     st.session_state.page = "历史报告"
     st.switch_page("pages/04_历史报告.py")
 
@@ -342,6 +398,12 @@ if "current_project" not in st.session_state:
 # 主要上传区域
 st.markdown('<div class="upload-area">', unsafe_allow_html=True)
 
+# 先选择数据模态
+analysis_type = st.selectbox(
+    "选择数据模态",
+    ["文本分析", "表格分析", "图像分析"]
+)
+
 # 上传方式选择
 upload_method = st.selectbox(
     "选择上传方式",
@@ -350,12 +412,15 @@ upload_method = st.selectbox(
 
 # 文件上传
 if upload_method == "文件上传":
-    data_source_type = st.radio(
-        "选择数据源类型",
-        ["已有标签文件（CSV/JSON）", "标准数据集（自动识别）", 
-         "文件夹结构（文件夹名=标签）", "无标签（仅部分检测）"],
-        horizontal=True
-    )
+    if analysis_type == "图像分析":
+        data_source_type = st.radio(
+            "选择数据源类型",
+            ["已有标签文件（CSV/JSON）", "标准数据集（自动识别）", 
+             "文件夹结构（文件夹名=标签）", "无标签（仅部分检测）"],
+            horizontal=True
+        )
+    else:
+        data_source_type = "已有标签文件（CSV/JSON）"
     
     if data_source_type == "标准数据集（自动识别）":
         st.markdown("#### 标准数据集选择")
@@ -378,7 +443,7 @@ if upload_method == "文件上传":
         
         project_name = st.text_input("项目名称", placeholder="输入项目名称")
         
-        if st.button("加载数据集", use_container_width=True):
+        if st.button("加载数据集", width='stretch'):
             import sys
             sys.path.insert(0, str(Path(__file__).parent.parent))
             from modules.data_adapter import DataAdapter
@@ -434,7 +499,7 @@ if upload_method == "文件上传":
             
             project_name = st.text_input("项目名称", placeholder="输入项目名称", key='project_name_std')
             
-            if st.button("开始检测", use_container_width=True):
+            if st.button("开始检测", width='stretch'):
                 import time
                 import sys
                 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -473,28 +538,31 @@ if upload_method == "文件上传":
                     st.switch_page("pages/06_图像分析详情.py")
     
     else:
-        uploaded_file = st.file_uploader(
-            "拖拽文件到此处或点击上传",
-            type=["csv", "xlsx", "txt", "jpg", "png", "zip"],
-            accept_multiple_files=False,
-            help="支持 CSV、Excel、TXT、JPG、PNG 文件和ZIP压缩包"
-        )
+        if analysis_type == "文本分析":
+            uploaded_file = st.file_uploader(
+                "拖拽文件到此处或点击上传文本文件",
+                type=["txt", "csv"],
+                accept_multiple_files=False,
+                help="支持 TXT 和 CSV 格式"
+            )
+        elif analysis_type == "表格分析":
+            uploaded_file = st.file_uploader(
+                "拖拽文件到此处或点击上传表格文件",
+                type=["csv", "xlsx"],
+                accept_multiple_files=False,
+                help="支持 CSV 和 Excel 格式"
+            )
+        else:
+            uploaded_file = st.file_uploader(
+                "拖拽文件到此处或点击上传图像文件",
+                type=["jpg", "jpeg", "png", "zip"],
+                accept_multiple_files=False,
+                help="支持 JPG、PNG 图像文件和 ZIP 压缩包"
+            )
         
         project_name = st.text_input("项目名称", placeholder="输入项目名称")
         
-        analysis_type = st.selectbox(
-            "选择分析类型",
-            ["自动检测", "表格分析", "文本分析", "图像分析"]
-        )
-        
         file_ext = uploaded_file.name.split('.')[-1].lower() if uploaded_file else ""
-        if analysis_type == "自动检测" and uploaded_file:
-            if file_ext in ['csv', 'xlsx']:
-                analysis_type = "表格分析"
-            elif file_ext == 'txt':
-                analysis_type = "文本分析"
-            elif file_ext in ['jpg', 'png', 'zip']:
-                analysis_type = "图像分析"
         
         label_col_input = None
         image_modules = ['basic_quality']
@@ -709,13 +777,18 @@ if upload_method == "文件上传":
                     "analysis_type": analysis_type,
                     "upload_time": current_time,
                     "file_content": file_content,
-                    "basic_info": basic_info
+                    "basic_info": basic_info,
+                    "analysis_result": analysis_result,
                 }
                 
                 db_project_id = db.add_project(project)
                 if db_project_id:
                     project['db_id'] = db_project_id
                     print(f"项目已存储到数据库，ID: {db_project_id}")
+                    try:
+                        db.add_analysis_result(db_project_id, analysis_result)
+                    except Exception:
+                        pass
                 
                 st.session_state.projects.append(project)
                 st.session_state.current_project = project
@@ -767,7 +840,7 @@ elif upload_method == "历史上传":
                                     from modules.config import Config
                                     cfg = Config.fromfile(str(Path(__file__).parent.parent / 'config.yaml'))
                                     detector = ImageDetector(cfg)
-                                    st.session_state.analysis_result = detector.detect(fc)
+                                    st.session_state.analysis_result = detector.detect(fc, modules=['basic_quality'])
                     
                     if project['analysis_type'] == "表格分析":
                         st.switch_page("pages/05_表格分析详情.py")
@@ -783,10 +856,6 @@ elif upload_method == "历史上传":
 elif upload_method == "URL上传":
     url = st.text_input("输入文件URL", placeholder="例如：https://example.com/data.csv")
     project_name = st.text_input("项目名称", placeholder="输入项目名称")
-    analysis_type = st.selectbox(
-        "选择分析类型",
-        ["表格分析", "文本分析", "图像分析"]
-    )
     
     if st.button("确认上传", width='stretch'):
         import time
@@ -2391,7 +2460,7 @@ if st.session_state.current_project:
                 
                 # 再次分析按钮
                 if st.button("再次分析"):
-                    del project["analysis_result"]
+                    st.session_state.reanalyze_pending = True
                     st.rerun()
                 
                 st.markdown('</div>', unsafe_allow_html=True)

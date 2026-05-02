@@ -248,7 +248,7 @@ with st.sidebar:
     
     with st.expander("查看状态", expanded=False):
         # 刷新按钮
-        if st.button("刷新状态", use_container_width=True):
+        if st.button("刷新状态", width='stretch'):
             # 清除缓存
             check_api_status.clear()
             st.rerun()
@@ -315,7 +315,7 @@ with st.container():
                 st.write("**问题:**")
                 if result["issues"]:
                     issues_df = pd.DataFrame(result["issues"])
-                    st.dataframe(issues_df, use_container_width=True)
+                    st.dataframe(issues_df, width='stretch')
                 else:
                     st.success("未检测到问题")
             else:
@@ -339,7 +339,7 @@ with st.container():
                 st.write("**问题:**")
                 if result["issues"]:
                     issues_df = pd.DataFrame(result["issues"])
-                    st.dataframe(issues_df, use_container_width=True)
+                    st.dataframe(issues_df, width='stretch')
                 else:
                     st.success("未检测到问题")
             else:
@@ -363,7 +363,7 @@ with st.container():
                 st.write("**问题:**")
                 if result["issues"]:
                     issues_df = pd.DataFrame(result["issues"])
-                    st.dataframe(issues_df, use_container_width=True)
+                    st.dataframe(issues_df, width='stretch')
                 else:
                     st.success("未检测到问题")
             else:

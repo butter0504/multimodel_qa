@@ -61,21 +61,7 @@ body {
     margin-bottom: 1.5rem;
 }
 
-/* 卡片样式 */
-.card {
-    background: var(--bg-white);
-    border-radius: 12px;
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
-    padding: 20px;
-    margin-bottom: 20px;
-    border: 1px solid var(--border-color);
-    transition: all 0.3s ease;
-}
-
-.card:hover {
-    transform: translateY(-2px);
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
-}
+.card { display: none; }
 
 /* 按钮样式 */
 .stButton > button {
@@ -387,7 +373,6 @@ with tab2:
         # 显示详细问题列表（带颜色标记）
         st.markdown("<h3>问题样本列表</h3>", unsafe_allow_html=True)
         with st.container():
-            st.markdown('<div class="card">', unsafe_allow_html=True)
             # 构建问题数据框
             issues_data = []
             for issue in issues:
@@ -432,7 +417,6 @@ with tab2:
                     file_name=f"table_issues_{uploaded_file.name.split('.')[0]}.csv" if uploaded_file else "table_issues.csv",
                     mime="text/csv"
                 )
-            st.markdown('</div>', unsafe_allow_html=True)
     else:
         st.success("🎉 未检测到任何问题，数据质量良好！")
 
@@ -443,7 +427,6 @@ with tab3:
     # 缺失值分布
     st.markdown("<h3>缺失值分布</h3>", unsafe_allow_html=True)
     with st.container():
-        st.markdown('<div class="card">', unsafe_allow_html=True)
         missing_stats = result["missing_stats"]
         if missing_stats['total'] > 0:
             # 准备缺失值数据
@@ -477,12 +460,10 @@ with tab3:
             st.plotly_chart(fig, config={'responsive': True})
         else:
             st.success("没有缺失值")
-        st.markdown('</div>', unsafe_allow_html=True)
     
     # 异常值分析
     st.markdown("<h3>异常值分析</h3>", unsafe_allow_html=True)
     with st.container():
-        st.markdown('<div class="card">', unsafe_allow_html=True)
         outlier_stats = result["outlier_stats"]
         if outlier_stats:
             # 准备异常值数据
@@ -516,13 +497,11 @@ with tab3:
             st.plotly_chart(fig, config={'responsive': True})
         else:
             st.success("没有异常值")
-        st.markdown('</div>', unsafe_allow_html=True)
     
     # 标签错误分析
     if label_col and result.get("label_issues"):
         st.markdown("<h3>标签错误分析</h3>", unsafe_allow_html=True)
         with st.container():
-            st.markdown('<div class="card">', unsafe_allow_html=True)
             label_issues = result["label_issues"]
             
             # 显示详细的调试信息
@@ -569,46 +548,39 @@ with tab3:
                 st.write("### 错误流向分析")
                 error_flow = label_issues['error_flow']
                 st.write(f"错误流向数据: {error_flow}")
-            st.markdown('</div>', unsafe_allow_html=True)
 
 with tab4:
     # 原始JSON数据
     st.markdown("<h2>原始分析结果</h2>", unsafe_allow_html=True)
     with st.container():
-        st.markdown('<div class="card">', unsafe_allow_html=True)
         st.json(convert_to_serializable(result))
-        st.markdown('</div>', unsafe_allow_html=True)
 
 # 下载报告按钮
-st.markdown("<h2 style='margin-top: 30px;'>导出报告</h2>", unsafe_allow_html=True)
-with st.container():
-    st.markdown('<div class="card">', unsafe_allow_html=True)
-    
-    # 准备报告数据
-    report_data = {
-        "file_name": uploaded_file.name if uploaded_file else "unknown.csv",
-        "basic_info": result["basic_info"],
-        "metrics": result["metrics"],
-        "issues": result["issues"],
-        "missing_stats": result["missing_stats"],
-        "outlier_stats": result["outlier_stats"],
-        "duplicate_stats": result["duplicate_stats"],
-        "label_issues": result.get("label_issues", {})
-    }
-    
-    # 转换为 JSON 字符串
-    report_data = convert_to_serializable(report_data)
-    report_json = json.dumps(report_data, indent=2, ensure_ascii=False)
-    
-    # 下载按钮
-    st.download_button(
-        label="📥 下载详细报告",
-        data=report_json,
-        file_name=f"table_analysis_report_{uploaded_file.name.split('.')[0]}.json" if uploaded_file else "table_analysis_report.json",
-        mime="application/json"
-    )
-    
-    st.markdown('</div>', unsafe_allow_html=True)
+st.markdown("**导出报告**")
+
+# 准备报告数据
+report_data = {
+    "file_name": uploaded_file.name if uploaded_file else "unknown.csv",
+    "basic_info": result["basic_info"],
+    "metrics": result["metrics"],
+    "issues": result["issues"],
+    "missing_stats": result["missing_stats"],
+    "outlier_stats": result["outlier_stats"],
+    "duplicate_stats": result["duplicate_stats"],
+    "label_issues": result.get("label_issues", {})
+}
+
+# 转换为 JSON 字符串
+report_data = convert_to_serializable(report_data)
+report_json = json.dumps(report_data, indent=2, ensure_ascii=False)
+
+# 下载按钮
+st.download_button(
+    label="📥 下载详细报告",
+    data=report_json,
+    file_name=f"table_analysis_report_{uploaded_file.name.split('.')[0]}.json" if uploaded_file else "table_analysis_report.json",
+    mime="application/json"
+)
 
 # 页脚
 st.markdown("""
