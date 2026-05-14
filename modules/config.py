@@ -44,11 +44,32 @@ _DEFAULT_CONFIG = {
     },
     'feature_extraction': {
         'image_model': 'resnet50',
-        'text_model': 'tfidf',
+        'text_model': 'bert',
         'tabular_method': 'standard_scaler',
         'batch_size': 32,
         'max_features_tfidf': 10000,
         'image_resize': 224,
+    },
+    'adapter': {
+        'llm_model': 'gpt-3.5-turbo',
+        'llm_max_tokens': 4096,
+        'llm_temperature': 0.1,
+        'auto_detect_format': True,
+        'fallback_to_llm': True,
+        'load_images': True,
+        'encoding': 'utf-8',
+    },
+    'scheduler': {
+        'max_workers': 2,
+        'default_modules_image': ['basic_quality'],
+        'default_modules_text': ['text_length', 'duplicate', 'character_anomaly'],
+        'default_modules_table': ['missing_values', 'outliers', 'duplicates'],
+    },
+    'storage': {
+        'backend': 'sqlite',
+        'sqlite_path': './data/multimodel_qa.db',
+        'local_json_path': './data/local_storage.json',
+        'reports_dir': './reports/',
     },
     'report': {
         'output_dir': './reports/',
@@ -82,6 +103,9 @@ class Config:
         self.data = cfg.get('data', {})
         self.detection = cfg.get('detection', {})
         self.feature_extraction = cfg.get('feature_extraction', {})
+        self.adapter = cfg.get('adapter', {})
+        self.scheduler = cfg.get('scheduler', {})
+        self.storage = cfg.get('storage', {})
         self.report = cfg.get('report', {})
 
     @classmethod

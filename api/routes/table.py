@@ -1,54 +1,53 @@
 from fastapi import APIRouter, UploadFile, File, Query
-import pandas as pd
-import io
-import numpy as np
-from modules.table_detector import TableDetector
-from api.models.schemas import TableAnalysisResponse
+from typing import Optional
+
+from modules.interface import Interface, DetectionRequest
 
 router = APIRouter()
+_interface = Interface()
 
 
-def convert_numpy(obj):
-    """递归转换 numpy 类型为 Python 原生类型"""
-    if isinstance(obj, np.integer):
-        return int(obj)
-    elif isinstance(obj, np.floating):
-        return float(obj)
-    elif isinstance(obj, np.ndarray):
-        return obj.tolist()
-    elif isinstance(obj, dict):
-        return {key: convert_numpy(value) for key, value in obj.items()}
-    elif isinstance(obj, (list, tuple)):
-        return [convert_numpy(item) for item in obj]
-    else:
-        return obj
-
-
-@router.post("/detect", response_model=TableAnalysisResponse)
+@router.post("/detect")
 async def detect_table(
     file: UploadFile = File(...),
-    label_col: str = Query(None, description="标签列名称")
+    label_col: Optional[str] = Query(None, description="标签列名称"),
+    format_hint: Optional[str] = Query(None, description="数据格式提示"),
 ):
-    """检测表格数据质量"""
-    # 读取上传的文件
+    import tempfile
+    import os
+
     contents = await file.read()
-    
-    # 根据文件扩展名读取数据
-    if file.filename.endswith('.csv'):
-        df = pd.read_csv(io.BytesIO(contents))
-    elif file.filename.endswith('.xlsx'):
-        df = pd.read_excel(io.BytesIO(contents))
-    else:
-        return {"error": "Unsupported file format. Please upload a CSV or Excel file."}
-    
-    # 检测数据质量
-    detector = TableDetector()
-    result = detector.detect(df, label_col=label_col)
-    
-    # 添加文件名到结果
-    result["basic_info"]["filename"] = file.filename
-    
-    # 转换 numpy 类型为 Python 原生类型
-    result = convert_numpy(result)
-    
-    return result
+    suffix = os.path.splitext(file.filename)[1] if file.filename else ""
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
+        f.write(contents)
+        tmp_path = f.name
+
+    try:
+        request = DetectionRequest(
+            source=tmp_path,
+            source_type="path",
+            modality="table",
+            modules=["missing_values", "outliers", "duplicates"],
+            format_hint=format_hint or "csv",
+            label_column=label_col,
+            extra={"filename": file.filename},
+        )
+
+        response = _interface.process_request(request)
+
+        result = {
+            "success": response.success,
+            "data_info": response.data_object_info,
+            "detection": response.detection_result,
+        }
+        if response.errors:
+            result["errors"] = response.errors
+        if response.warnings:
+            result["warnings"] = response.warnings
+
+        return result
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass

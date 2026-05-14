@@ -1,0 +1,54 @@
+{
+  "text_length": {
+    "status": "PASS",
+    "short_text_count": 0,
+    "long_text_count": 0,
+    "abnormal_length_count": 121,
+    "mean_length": 241.6,
+    "time": 0.0
+  },
+  "duplicate": {
+    "status": "PASS",
+    "exact_duplicate_count": 1,
+    "approximate_duplicate_count": 4,
+    "unique_text_count": 2999,
+    "time": 346.7
+  },
+  "label_error": {
+    "status": "PASS",
+    "precision": 0.425,
+    "recall": 0.288,
+    "f1": 0.343,
+    "detected_count": 388,
+    "time": 53.3
+  },
+  "character_anomaly": {
+    "status": "PASS",
+    "garbled_text_count": 0,
+    "high_special_char_count": 0,
+    "whitespace_padding_count": 373,
+    "time": 0.7
+  },
+  "language": {
+    "status": "PASS",
+    "language_distribution": {
+      "english": 2888,
+      "latin": 112
+    },
+    "mixed_language_count": 1,
+    "time": 0.7
+  },
+  "perplexity": {
+    "status": "PASS",
+    "method": "statistical_approximation",
+    "high_perplexity_count": 110,
+    "mean_perplexity": 1.46,
+    "time": 0.4
+  },
+  "sentiment_consistency": {
+    "status": "PASS",
+    "inconsistency_count": 57,
+    "inconsistency_rate": 1.9,
+    "time": 0.1
+  }
+}

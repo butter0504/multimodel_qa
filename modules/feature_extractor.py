@@ -16,12 +16,29 @@ class BaseEncoder(ABC):
 
 
 class ImageEncoder(BaseEncoder):
+    """
+    图像深度特征提取器
+    ==================
+    使用 ResNet-50 预训练模型提取 2048 维特征向量。
+
+    特点：
+        - 预训练权重：ImageNet 上的 ResNet-50 (torchvision.models.resnet50)
+        - 去掉最后的全连接层，输出 2048 维特征
+        - 图像预处理：Resize(256) → CenterCrop(224) → ToTensor → Normalize
+        - 批量提取 + GPU 加速
+        - 支持文件路径 (str) 和原始字节数据 (bytes) 两种输入
+        - 当 GPU/模型不可用时自动回退到统计特征
+    """
+
+    FEATURE_DIM = 2048
+
     def __init__(self, cfg: Config):
         self.cfg = cfg
         self.model_name = cfg.get('feature_extraction.image_model', 'resnet50')
-        self.resize = cfg.get('feature_extraction.image_resize', 224)
         self.batch_size = cfg.get('feature_extraction.batch_size', 32)
         self._model = None
+        self._device = None
+        self._transform = None
 
     def modality(self) -> str:
         return 'image'
@@ -30,60 +47,131 @@ class ImageEncoder(BaseEncoder):
         if self._model is not None:
             return
         try:
-            import torchvision.models as models
             import torch
+            import torchvision.models as models
+            import torchvision.transforms as transforms
+
+            self._device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
             if self.model_name == 'resnet50':
-                base = models.resnet50(pretrained=False)
+                try:
+                    from torchvision.models import ResNet50_Weights
+                    base = models.resnet50(weights=ResNet50_Weights.DEFAULT)
+                except ImportError:
+                    base = models.resnet50(pretrained=True)
             elif self.model_name == 'resnet18':
-                base = models.resnet18(pretrained=False)
+                try:
+                    from torchvision.models import ResNet18_Weights
+                    base = models.resnet18(weights=ResNet18_Weights.DEFAULT)
+                    self.FEATURE_DIM = 512
+                except ImportError:
+                    base = models.resnet18(pretrained=True)
+                    self.FEATURE_DIM = 512
             else:
-                base = models.resnet18(pretrained=False)
+                try:
+                    from torchvision.models import ResNet50_Weights
+                    base = models.resnet50(weights=ResNet50_Weights.DEFAULT)
+                except ImportError:
+                    base = models.resnet50(pretrained=True)
+
             self._model = torch.nn.Sequential(*list(base.children())[:-1])
+            self._model = self._model.to(self._device)
             self._model.eval()
+
+            self._transform = transforms.Compose([
+                transforms.Resize(256),
+                transforms.CenterCrop(224),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                     std=[0.229, 0.224, 0.225]),
+            ])
         except ImportError:
             self._model = None
+
+    def extract(self, image_paths: List[Union[str, bytes]],
+                batch_size: int = 32) -> np.ndarray:
+        """
+        批量提取图像深度特征，使用 GPU 加速。
+
+        Parameters
+        ----------
+        image_paths : List[Union[str, bytes]]
+            图像路径列表或原始字节数据列表，支持混合输入：
+            - str: 图像文件路径，直接从磁盘读取
+            - bytes: 图像原始字节数据，从内存解码
+        batch_size : int
+            批处理大小，默认 32。增大可提高 GPU 利用率，但需更多显存。
+
+        Returns
+        -------
+        np.ndarray
+            形状为 (n_images, 2048) 的特征矩阵。
+            解码失败的图像对应位置为零向量。
+        """
+        self._load_model()
+        if self._model is not None:
+            return self._extract_with_model(image_paths, batch_size)
+        return self._encode_with_stats(image_paths)
+
+    def _extract_with_model(self, image_paths: List[Union[str, bytes]],
+                            batch_size: int) -> np.ndarray:
+        import torch
+        from PIL import Image
+        import io
+
+        all_features = []
+        n_images = len(image_paths)
+
+        with torch.no_grad():
+            for start in range(0, n_images, batch_size):
+                batch_paths = image_paths[start:start + batch_size]
+                batch_tensors = []
+
+                for item in batch_paths:
+                    try:
+                        if isinstance(item, str):
+                            img = Image.open(item).convert('RGB')
+                        elif isinstance(item, bytes):
+                            img = Image.open(io.BytesIO(item)).convert('RGB')
+                        else:
+                            img = Image.open(io.BytesIO(item)).convert('RGB')
+                        tensor = self._transform(img)
+                        batch_tensors.append(tensor)
+                    except Exception:
+                        batch_tensors.append(torch.zeros(3, 224, 224))
+
+                if not batch_tensors:
+                    continue
+
+                batch = torch.stack(batch_tensors).to(self._device)
+                feats = self._model(batch)
+                feats = feats.squeeze(-1).squeeze(-1).cpu().numpy()
+                all_features.append(feats)
+
+        if all_features:
+            return np.vstack(all_features)
+        return np.zeros((n_images, self.FEATURE_DIM))
 
     def encode(self, data: List[bytes]) -> np.ndarray:
         self._load_model()
         if self._model is not None:
-            return self._encode_with_model(data)
+            return self._extract_with_model(data, self.batch_size)
         return self._encode_with_stats(data)
 
-    def _encode_with_model(self, data: List[bytes]) -> np.ndarray:
-        import torch
-        import torchvision.transforms as transforms
-        from PIL import Image
-        import io
-
-        transform = transforms.Compose([
-            transforms.Resize((self.resize, self.resize)),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                 std=[0.229, 0.224, 0.225]),
-        ])
-
-        embeddings = []
-        for img_bytes in data:
-            try:
-                img = Image.open(io.BytesIO(img_bytes)).convert('RGB')
-                tensor = transform(img).unsqueeze(0)
-                with torch.no_grad():
-                    feat = self._model(tensor)
-                embeddings.append(feat.squeeze().numpy())
-            except Exception:
-                embeddings.append(np.zeros(512))
-
-        return np.array(embeddings)
-
-    def _encode_with_stats(self, data: List[bytes]) -> np.ndarray:
+    def _encode_with_stats(self, data: List[Union[str, bytes]]) -> np.ndarray:
         from PIL import Image
         import io
         import cv2
 
         features = []
-        for img_bytes in data:
+        for item in data:
             try:
-                img = Image.open(io.BytesIO(img_bytes))
+                if isinstance(item, str):
+                    img = Image.open(item)
+                elif isinstance(item, bytes):
+                    img = Image.open(io.BytesIO(item))
+                else:
+                    img = Image.open(io.BytesIO(item))
                 img_array = np.array(img)
                 feat = self._extract_image_stats(img_array)
                 features.append(feat)
@@ -125,18 +213,109 @@ class ImageEncoder(BaseEncoder):
 
 
 class TextEncoder(BaseEncoder):
+    """
+    文本深度特征提取器
+    ==================
+    使用 BERT-base-uncased 预训练模型提取 768 维特征向量。
+
+    特点：
+        - 预训练权重：bert-base-uncased (transformers 库)
+        - 提取 [CLS] token 的 768 维向量作为句子表示
+        - 批量编码 + GPU 加速
+        - padding 和 truncation 到最大 512 长度
+        - 当 GPU/模型不可用时自动回退到 TF-IDF
+    """
+
+    FEATURE_DIM = 768
+    MODEL_NAME = 'bert-base-uncased'
+    MAX_LENGTH = 512
+
     def __init__(self, cfg: Config):
         self.cfg = cfg
-        self.model_name = cfg.get('feature_extraction.text_model', 'tfidf')
+        self.model_name = cfg.get('feature_extraction.text_model', 'bert')
         self.max_features = cfg.get('feature_extraction.max_features_tfidf', 10000)
-        self._vectorizer = None
+        self.batch_size = cfg.get('feature_extraction.batch_size', 32)
+        self._tokenizer = None
+        self._model = None
+        self._device = None
 
     def modality(self) -> str:
         return 'text'
 
+    def _load_model(self):
+        if self._model is not None:
+            return
+        try:
+            import torch
+            from transformers import AutoTokenizer, AutoModel
+
+            self._device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+            self._tokenizer = AutoTokenizer.from_pretrained(self.MODEL_NAME)
+            self._model = AutoModel.from_pretrained(self.MODEL_NAME)
+            self._model = self._model.to(self._device)
+            self._model.eval()
+        except ImportError:
+            self._model = None
+            self._tokenizer = None
+
+    def extract(self, texts: List[str], batch_size: int = 32) -> np.ndarray:
+        """
+        批量提取文本深度特征，使用 GPU 加速。
+
+        Parameters
+        ----------
+        texts : List[str]
+            文本列表
+        batch_size : int
+            批处理大小，默认 32。增大可提高 GPU 利用率，但需更多显存。
+
+        Returns
+        -------
+        np.ndarray
+            形状为 (n_texts, 768) 的特征矩阵。
+            编码失败的文本对应位置为零向量。
+        """
+        self._load_model()
+        if self._model is not None and self._tokenizer is not None:
+            return self._extract_with_bert(texts, batch_size)
+        return self._encode_with_tfidf(texts)
+
+    def _extract_with_bert(self, texts: List[str], batch_size: int) -> np.ndarray:
+        import torch
+
+        all_embeddings = []
+        n_texts = len(texts)
+
+        with torch.no_grad():
+            for start in range(0, n_texts, batch_size):
+                batch_texts = texts[start:start + batch_size]
+
+                encoded = self._tokenizer(
+                    batch_texts,
+                    padding=True,
+                    truncation=True,
+                    max_length=self.MAX_LENGTH,
+                    return_tensors='pt',
+                )
+
+                encoded = {k: v.to(self._device) for k, v in encoded.items()}
+
+                try:
+                    outputs = self._model(**encoded)
+                    cls_embeddings = outputs.last_hidden_state[:, 0, :].cpu().numpy()
+                    all_embeddings.append(cls_embeddings)
+                except Exception:
+                    n_batch = len(batch_texts)
+                    all_embeddings.append(np.zeros((n_batch, self.FEATURE_DIM)))
+
+        if all_embeddings:
+            return np.vstack(all_embeddings)
+        return np.zeros((n_texts, self.FEATURE_DIM))
+
     def encode(self, data: List[str]) -> np.ndarray:
         if self.model_name == 'bert':
-            return self._encode_with_bert(data)
+            return self.extract(data, self.batch_size)
         return self._encode_with_tfidf(data)
 
     def _encode_with_tfidf(self, data: List[str]) -> np.ndarray:
@@ -150,31 +329,6 @@ class TextEncoder(BaseEncoder):
             return tfidf_matrix.toarray()
         except ValueError:
             return np.zeros((len(data), self.max_features))
-
-    def _encode_with_bert(self, data: List[str]) -> np.ndarray:
-        try:
-            from transformers import AutoTokenizer, AutoModel
-            import torch
-
-            tokenizer = AutoTokenizer.from_pretrained('bert-base-uncased')
-            model = AutoModel.from_pretrained('bert-base-uncased')
-            model.eval()
-
-            embeddings = []
-            batch_size = self.cfg.get('feature_extraction.batch_size', 32)
-
-            for i in range(0, len(data), batch_size):
-                batch = data[i:i + batch_size]
-                encoded = tokenizer(batch, padding=True, truncation=True,
-                                    max_length=512, return_tensors='pt')
-                with torch.no_grad():
-                    outputs = model(**encoded)
-                batch_emb = outputs.last_hidden_state[:, 0, :].numpy()
-                embeddings.append(batch_emb)
-
-            return np.vstack(embeddings)
-        except ImportError:
-            return self._encode_with_tfidf(data)
 
 
 class TabularEncoder(BaseEncoder):

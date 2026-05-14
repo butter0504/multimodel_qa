@@ -21,6 +21,8 @@
     )
 """
 
+from __future__ import annotations
+
 import cv2
 import numpy as np
 from PIL import Image
@@ -32,6 +34,10 @@ from typing import Dict, Any, List, Optional, Tuple
 from .base_detector import BaseDetector
 from .config import Config
 from .report import DiagnosisSection, IssueRecord
+from .pools import (
+    LabelDefectPool, DistributionShiftPool,
+    SampleQualityPool, FormatStructurePool,
+)
 
 
 class BasicQualityDetector:
@@ -269,12 +275,13 @@ class LabelErrorDetector:
     使用 cleanlab 库的置信学习框架检测图像标签中的标注错误。
 
     工作流程：
-        1. 使用预训练 ResNet18 提取图像特征向量
+        1. 提取图像特征（优先使用 ResNet 深度特征，回退到统计特征）
         2. 基于特征向量训练 RandomForest 分类器
         3. 使用交叉验证获取样本的预测概率分布
-        4. 调用 cleanlab 的 get_label_quality_scores 计算标签质量分数
-        5. 质量分数低于阈值的样本被标记为潜在标签错误
+        4. 调用 cleanlab 的 find_label_issues 识别标签错误
+        5. 调用 get_label_quality_scores 计算标签质量分数
         6. 分类器的预测结果作为建议修正标签
+        7. 若提供真实标签(clean_labels)，计算检测性能指标
 
     前置条件：
         - 需要提供标签列表（labels）
@@ -289,15 +296,13 @@ class LabelErrorDetector:
 
     def __init__(self, cfg: Config):
         self.cfg = cfg
-        # 标签质量分数阈值：低于此值的样本被标记为潜在标签错误
-        self.quality_threshold = cfg.get('detection.threshold', 0.6)
-        # 交叉验证折数
         self.cv_folds = cfg.get('detection.cross_validation_folds', 5)
-        # 随机森林分类器参数
         self.n_estimators = cfg.get('detection.n_estimators', 200)
         self.random_state = cfg.get('detection.random_state', 42)
+        self._resnet_features = None
 
-    def detect(self, images: List[bytes], labels: List) -> Dict[str, Any]:
+    def detect(self, images: List[bytes], labels: List,
+               clean_labels: Optional[List] = None) -> Dict[str, Any]:
         """
         使用置信学习检测图像标签错误。
 
@@ -307,6 +312,8 @@ class LabelErrorDetector:
             图像的原始字节数据列表
         labels : List
             对应的标签列表，支持任意类型的标签
+        clean_labels : Optional[List]
+            真实标签列表（用于评估检测性能），若提供则计算精确率/召回率/F1
 
         Returns
         -------
@@ -318,26 +325,22 @@ class LabelErrorDetector:
             - suggested_labels: 建议修正的标签字典 {index: suggested_label}
             - label_quality_scores: 每个样本的标签质量分数
             - confidence_thresholds: 每个类别的置信阈值
-            - debug_info: 调试信息（类别分布、分数统计等）
+            - performance: 性能评估指标（当提供 clean_labels 时）
+            - debug_info: 调试信息
         """
         try:
             from sklearn.ensemble import RandomForestClassifier
             from sklearn.model_selection import cross_val_predict
             from sklearn.preprocessing import LabelEncoder
             from cleanlab.rank import get_label_quality_scores
+            from cleanlab.filter import find_label_issues
 
-            # Step 1: 提取图像统计特征
-            # 使用颜色直方图 + 纹理特征作为轻量级特征表示
-            # 这种方式无需 GPU，适合快速检测
-            features = self._extract_features(images)
+            features = self._extract_features_auto(images)
 
-            # Step 2: 标签编码
-            # 将任意类型的标签（字符串、数字等）统一转为 0, 1, 2, ... 的整数编码
             le = LabelEncoder()
             y = le.fit_transform(labels)
             n_classes = len(le.classes_)
 
-            # 交叉验证要求每类至少有 cv_folds 个样本
             class_counts = np.bincount(y)
             min_class_count = int(np.min(class_counts))
             actual_cv_folds = min(self.cv_folds, min_class_count)
@@ -351,9 +354,6 @@ class LabelErrorDetector:
                     "label_quality_scores": [],
                 }
 
-            # Step 3: 交叉验证获取预测概率
-            # 使用 RandomForest 作为分类器，通过交叉验证避免过拟合
-            # cross_val_predict 返回每个样本在"未参与训练"的模型上的预测概率
             model = RandomForestClassifier(
                 n_estimators=self.n_estimators,
                 random_state=self.random_state,
@@ -363,27 +363,23 @@ class LabelErrorDetector:
                 model, features, y, cv=actual_cv_folds, method='predict_proba'
             )
 
-            # Step 4: 计算标签质量分数
-            # cleanlab 的 get_label_quality_scores 基于预测概率和真实标签，
-            # 使用自适应阈值计算每个样本的标签质量分数
-            # 分数越低，标签越可能有问题
             label_quality_scores = get_label_quality_scores(y, pred_probs)
 
-            # Step 5: 识别标签错误
-            # 质量分数低于阈值的样本被标记为潜在标签错误
-            error_indices = np.where(label_quality_scores < self.quality_threshold)[0].tolist()
+            issue_result = find_label_issues(
+                labels=y,
+                pred_probs=pred_probs,
+            )
+            if issue_result.dtype == bool:
+                error_indices = np.where(issue_result)[0].tolist()
+            else:
+                error_indices = issue_result.tolist()
 
-            # Step 6: 生成建议修正标签
-            # 使用全量数据训练的模型预测作为建议标签
             model.fit(features, y)
             predictions = model.predict(features)
             suggested_labels = {}
             for idx in error_indices:
                 suggested_labels[str(idx)] = int(predictions[idx])
 
-            # Step 7: 计算置信学习的噪声矩阵
-            # 噪声矩阵 T[i][j] 表示真实标签为 i 但被标注为 j 的概率
-            # 对角线元素越大，标签越可靠
             percentile_threshold = self.cfg.get('detection.percentile_threshold', 85)
             thresholds = {}
             classes = np.unique(y)
@@ -408,7 +404,7 @@ class LabelErrorDetector:
                     0
                 )
 
-            return {
+            result = {
                 "error_count": len(error_indices),
                 "error_rate": len(error_indices) / len(y) if len(y) > 0 else 0,
                 "error_indices": error_indices,
@@ -418,6 +414,7 @@ class LabelErrorDetector:
                 "confident_joint_matrix": C_confident.tolist(),
                 "noise_matrix": noise_matrix.tolist(),
                 "class_names": le.classes_.tolist(),
+                "feature_type": self._feature_type_used,
                 "debug_info": {
                     "n_classes": n_classes,
                     "class_counts": class_counts.tolist(),
@@ -428,10 +425,153 @@ class LabelErrorDetector:
                 },
             }
 
+            if clean_labels is not None:
+                performance = self._evaluate_performance(
+                    y, clean_labels, error_indices, le
+                )
+                result["performance"] = performance
+
+            return result
+
         except ImportError as e:
             return {"error": f"缺少依赖库: {str(e)}", "error_count": 0}
         except Exception as e:
             return {"error": str(e), "error_count": 0}
+
+    def _evaluate_performance(self, noisy_labels: np.ndarray,
+                               clean_labels: List,
+                               detected_error_indices: List[int],
+                               label_encoder: LabelEncoder) -> Dict[str, Any]:
+        """
+        当提供真实标签时，评估标签错误检测的性能。
+
+        Parameters
+        ----------
+        noisy_labels : np.ndarray
+            编码后的噪声标签
+        clean_labels : List
+            真实标签列表（原始格式，与 label_encoder 相同的类别）
+        detected_error_indices : List[int]
+            检测器识别出的标签错误索引
+        label_encoder : LabelEncoder
+            标签编码器
+
+        Returns
+        -------
+        Dict[str, Any]
+            性能评估指标
+        """
+        try:
+            clean_y = label_encoder.transform(clean_labels)
+
+            actual_error_mask = (noisy_labels != clean_y)
+            actual_error_indices = set(np.where(actual_error_mask)[0])
+            detected_error_set = set(detected_error_indices)
+
+            true_positives = len(actual_error_indices & detected_error_set)
+            false_positives = len(detected_error_set - actual_error_indices)
+            false_negatives = len(actual_error_indices - detected_error_set)
+
+            precision = true_positives / (true_positives + false_positives) if (true_positives + false_positives) > 0 else 0
+            recall = true_positives / (true_positives + false_negatives) if (true_positives + false_negatives) > 0 else 0
+            f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
+
+            actual_error_count = len(actual_error_indices)
+            detected_error_count = len(detected_error_set)
+
+            return {
+                "has_ground_truth": True,
+                "actual_error_count": actual_error_count,
+                "actual_error_rate": float(actual_error_count / len(noisy_labels)),
+                "detected_error_count": detected_error_count,
+                "true_positives": true_positives,
+                "false_positives": false_positives,
+                "false_negatives": false_negatives,
+                "precision": float(precision),
+                "recall": float(recall),
+                "f1_score": float(f1),
+            }
+        except Exception as e:
+            return {"has_ground_truth": True, "evaluation_error": str(e)}
+
+    def _extract_features_auto(self, images: List[bytes]) -> np.ndarray:
+        """
+        自动选择最佳特征提取方式。
+
+        优先使用 ResNet 深度特征（语义表达能力强），
+        若 GPU/模型不可用则回退到统计特征。
+        """
+        resnet_features = self._try_extract_resnet_features(images)
+        if resnet_features is not None:
+            self._feature_type_used = "resnet50"
+            return resnet_features
+
+        self._feature_type_used = "statistical"
+        return self._extract_features(images)
+
+    def _try_extract_resnet_features(self, images: List[bytes]) -> Optional[np.ndarray]:
+        """
+        尝试使用预训练 ResNet50 提取 2048 维深度特征。
+
+        Returns None if model/GPU not available.
+        """
+        try:
+            import torch
+            import torchvision.models as models
+            import torchvision.transforms as transforms
+
+            if not torch.cuda.is_available() and len(images) > 5000:
+                return None
+
+            try:
+                from torchvision.models import ResNet50_Weights
+                base = models.resnet50(weights=ResNet50_Weights.DEFAULT)
+            except ImportError:
+                base = models.resnet50(pretrained=True)
+
+            feature_extractor = torch.nn.Sequential(*list(base.children())[:-1])
+            feature_extractor.eval()
+
+            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            feature_extractor = feature_extractor.to(device)
+
+            transform = transforms.Compose([
+                transforms.Resize(256),
+                transforms.CenterCrop(224),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                     std=[0.229, 0.224, 0.225]),
+            ])
+
+            all_features = []
+            batch_size = 64
+
+            with torch.no_grad():
+                for start in range(0, len(images), batch_size):
+                    batch_imgs = images[start:start + batch_size]
+                    batch_tensors = []
+                    for img_bytes in batch_imgs:
+                        try:
+                            img_pil = Image.open(io.BytesIO(img_bytes)).convert('RGB')
+                            tensor = transform(img_pil)
+                            batch_tensors.append(tensor)
+                        except Exception:
+                            batch_tensors.append(torch.zeros(3, 224, 224))
+
+                    if not batch_tensors:
+                        continue
+
+                    batch = torch.stack(batch_tensors).to(device)
+                    feats = feature_extractor(batch)
+                    feats = feats.squeeze(-1).squeeze(-1).cpu().numpy()
+                    all_features.append(feats)
+
+            if all_features:
+                return np.vstack(all_features)
+            return None
+
+        except Exception:
+            return None
 
     def _extract_features(self, images: List[bytes]) -> np.ndarray:
         """
@@ -461,27 +601,23 @@ class LabelErrorDetector:
                 img_array = np.array(img_pil)
                 h, w = img_array.shape[:2]
 
-                # 颜色直方图特征（每通道 16 bin，共 48 维）
                 hist_features = []
                 for c in range(3):
                     hist = cv2.calcHist([img_array], [c], None, [16], [0, 256])
                     hist = hist.flatten() / (h * w + 1e-8)
                     hist_features.extend(hist.tolist())
 
-                # 灰度图统计特征
                 gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
                 laplacian_var = float(cv2.Laplacian(gray, cv2.CV_64F).var())
                 dark_ratio = float(np.sum(gray < 50) / gray.size)
                 bright_ratio = float(np.sum(gray > 205) / gray.size)
                 rms_contrast = float(np.std(gray) / 255.0)
 
-                # HSV 颜色空间特征
                 hsv = cv2.cvtColor(img_array, cv2.COLOR_RGB2HSV)
                 h_mean = float(np.mean(hsv[:, :, 0]))
                 s_mean = float(np.mean(hsv[:, :, 1]))
                 v_mean = float(np.mean(hsv[:, :, 2]))
 
-                # 通道统计特征
                 r_mean, g_mean, b_mean = [float(np.mean(img_array[:, :, c])) for c in range(3)]
                 r_std, g_std, b_std = [float(np.std(img_array[:, :, c])) for c in range(3)]
 
@@ -540,15 +676,16 @@ class SoftmaxEntropyPredictor:
             import torchvision.transforms as transforms
 
             try:
-                from torchvision.models import ResNet18_Weights
-                base = models.resnet18(weights=ResNet18_Weights.DEFAULT)
+                from torchvision.models import ResNet50_Weights
+                base = models.resnet50(weights=ResNet50_Weights.DEFAULT)
             except ImportError:
-                base = models.resnet18(pretrained=True)
+                base = models.resnet50(pretrained=True)
             self._model = torch.nn.Sequential(*list(base.children())[:-1])
             self._model.eval()
 
             self._transform = transforms.Compose([
-                transforms.Resize((224, 224)),
+                transforms.Resize(256),
+                transforms.CenterCrop(224),
                 transforms.ToTensor(),
                 transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                      std=[0.229, 0.224, 0.225]),
@@ -1048,6 +1185,10 @@ class ImageDetector(BaseDetector):
         self._label_detector = LabelErrorDetector(self.cfg)
         self._shift_detector = DistributionShiftDetector(self.cfg)
         self._uncertainty_estimator = UncertaintyEstimator(self.cfg)
+        self._label_defect_pool = LabelDefectPool(self.cfg)
+        self._distribution_shift_pool = DistributionShiftPool(self.cfg)
+        self._sample_quality_pool = SampleQualityPool(self.cfg)
+        self._format_structure_pool = FormatStructurePool(self.cfg)
 
     def modality(self) -> str:
         return 'image'
@@ -1055,7 +1196,11 @@ class ImageDetector(BaseDetector):
     def detect(self, data, labels: Optional[List] = None,
                modules: Optional[List[str]] = None,
                reference_images: Optional[List[bytes]] = None,
-               progress_callback=None) -> Dict[str, Any]:
+               clean_labels: Optional[List] = None,
+               progress_callback=None,
+               data_object=None,
+               texts: Optional[List[str]] = None,
+               data_root: str = "") -> Dict[str, Any]:
         """
         执行图像数据质量检测。
 
@@ -1071,11 +1216,23 @@ class ImageDetector(BaseDetector):
             - 'label_error': 标签错误检测（需要 labels）
             - 'distribution_shift': 分布偏移检测（需要 reference_images）
             - 'uncertainty': 不确定性估计（需要 labels）
+            - 'label_defect_pool': 标签缺陷检测池（需要 labels）
+            - 'distribution_shift_pool': 分布偏移检测池（需要 reference_images）
+            - 'sample_quality_pool': 样本质量检测池
+            - 'format_structure_pool': 格式结构规则池
             默认为 ['basic_quality']
         reference_images : Optional[List[bytes]]
             基准图像集，分布偏移检测需要此参数
+        clean_labels : Optional[List]
+            真实标签列表（用于评估标签错误检测性能），若提供则计算精确率/召回率/F1
         progress_callback : Optional[callable]
             进度回调函数，签名为 callback(module_name: str, progress: float)
+        data_object : Optional[DataObject]
+            数据对象，格式结构规则池需要此参数
+        texts : Optional[List[str]]
+            文本描述列表，样本质量检测池的 CLIP Score 需要此参数
+        data_root : str
+            数据根目录，格式结构规则池的路径检查需要此参数
 
         Returns
         -------
@@ -1102,6 +1259,10 @@ class ImageDetector(BaseDetector):
             "label_error": None,
             "distribution_shift": None,
             "uncertainty": None,
+            "label_defect_pool": None,
+            "distribution_shift_pool": None,
+            "sample_quality_pool": None,
+            "format_structure_pool": None,
         }
 
         # ---- 模块 1: 基础质量检测（必选） ----
@@ -1134,7 +1295,7 @@ class ImageDetector(BaseDetector):
         if 'label_error' in modules and labels is not None:
             if progress_callback:
                 progress_callback('label_error', 0.0)
-            label_result = self._label_detector.detect(images, labels)
+            label_result = self._label_detector.detect(images, labels, clean_labels=clean_labels)
             result["label_error"] = label_result
 
             if "error" not in label_result:
@@ -1249,6 +1410,169 @@ class ImageDetector(BaseDetector):
             if progress_callback:
                 progress_callback('uncertainty', 1.0)
 
+        # ---- 模块 5: 标签缺陷检测池 ----
+        if 'label_defect_pool' in modules and labels is not None:
+            if progress_callback:
+                progress_callback('label_defect_pool', 0.0)
+            try:
+                led = LabelErrorDetector(self.cfg)
+                features = led._extract_features_auto(images)
+                from sklearn.preprocessing import LabelEncoder
+                le = LabelEncoder()
+                y = le.fit_transform(labels)
+
+                pool_result = self._label_defect_pool.run_all(
+                    features=features, labels=y
+                )
+                result["label_defect_pool"] = pool_result.to_dict()
+
+                pool_section = DiagnosisSection("label_defect_pool", "标签缺陷检测池")
+                for mr in pool_result.method_results:
+                    pool_section.add_metric(
+                        f"{mr.method_name}_success", mr.success
+                    )
+                    if mr.success and len(mr.scores) > 0:
+                        pool_section.add_metric(
+                            f"{mr.method_name}_mean", float(np.mean(mr.scores))
+                        )
+
+                if pool_result.ensemble_scores is not None:
+                    high_defect_threshold = 0.7
+                    high_defect_indices = np.where(
+                        pool_result.ensemble_scores > high_defect_threshold
+                    )[0].tolist()
+                    pool_section.add_metric(
+                        "high_defect_count", len(high_defect_indices)
+                    )
+                    for idx in high_defect_indices:
+                        self.issues.append({
+                            "type": "label_defect",
+                            "index": idx,
+                            "defect_score": float(pool_result.ensemble_scores[idx]),
+                            "suggestion": "该样本可能存在标签缺陷，建议人工检查",
+                        })
+
+                self.report.add_section(pool_section)
+            except Exception as e:
+                result["label_defect_pool"] = {"error": str(e)}
+
+            if progress_callback:
+                progress_callback('label_defect_pool', 1.0)
+
+        # ---- 模块 6: 分布偏移检测池 ----
+        if 'distribution_shift_pool' in modules and reference_images is not None:
+            if progress_callback:
+                progress_callback('distribution_shift_pool', 0.0)
+            try:
+                target_features = self._shift_detector._extract_distribution_features(images)
+                ref_features = self._shift_detector._extract_distribution_features(reference_images)
+
+                pool_result = self._distribution_shift_pool.run_all(
+                    source_features=ref_features, target_features=target_features
+                )
+                result["distribution_shift_pool"] = pool_result.to_dict()
+
+                pool_section = DiagnosisSection("distribution_shift_pool", "分布偏移检测池")
+                for mr in pool_result.method_results:
+                    pool_section.add_metric(
+                        f"{mr.method_name}_success", mr.success
+                    )
+                    if mr.success and len(mr.scores) > 0:
+                        pool_section.add_metric(
+                            f"{mr.method_name}_score", float(mr.scores[0])
+                        )
+
+                if pool_result.ensemble_scores is not None and len(pool_result.ensemble_scores) > 0:
+                    ensemble_score = float(pool_result.ensemble_scores[0])
+                    if ensemble_score > 0.5:
+                        self.issues.append({
+                            "type": "distribution_shift_pool",
+                            "shift_score": ensemble_score,
+                            "suggestion": "检测到显著分布偏移，建议使用域适应方法或重新采集数据",
+                        })
+
+                self.report.add_section(pool_section)
+            except Exception as e:
+                result["distribution_shift_pool"] = {"error": str(e)}
+
+            if progress_callback:
+                progress_callback('distribution_shift_pool', 1.0)
+
+        # ---- 模块 7: 样本质量检测池 ----
+        if 'sample_quality_pool' in modules:
+            if progress_callback:
+                progress_callback('sample_quality_pool', 0.0)
+            try:
+                pool_result = self._sample_quality_pool.run_all(
+                    images=images, texts=texts
+                )
+                result["sample_quality_pool"] = pool_result.to_dict()
+
+                pool_section = DiagnosisSection("sample_quality_pool", "样本质量检测池")
+                for mr in pool_result.method_results:
+                    pool_section.add_metric(
+                        f"{mr.method_name}_success", mr.success
+                    )
+                    if mr.success and len(mr.scores) > 0:
+                        pool_section.add_metric(
+                            f"{mr.method_name}_mean", float(np.mean(mr.scores))
+                        )
+
+                if pool_result.ensemble_scores is not None:
+                    quality_threshold = 0.7
+                    low_quality_indices = np.where(
+                        pool_result.ensemble_scores > quality_threshold
+                    )[0].tolist()
+                    pool_section.add_metric(
+                        "low_quality_count", len(low_quality_indices)
+                    )
+                    for idx in low_quality_indices:
+                        self.issues.append({
+                            "type": "low_quality",
+                            "index": idx,
+                            "quality_anomaly_score": float(pool_result.ensemble_scores[idx]),
+                            "suggestion": "该样本质量异常，建议检查或丢弃",
+                        })
+
+                self.report.add_section(pool_section)
+            except Exception as e:
+                result["sample_quality_pool"] = {"error": str(e)}
+
+            if progress_callback:
+                progress_callback('sample_quality_pool', 1.0)
+
+        # ---- 模块 8: 格式结构规则池 ----
+        if 'format_structure_pool' in modules:
+            if progress_callback:
+                progress_callback('format_structure_pool', 0.0)
+            try:
+                pool_result = self._format_structure_pool.run_all(
+                    data_object=data_object,
+                    labels=labels,
+                    data_root=data_root,
+                )
+                result["format_structure_pool"] = pool_result.to_dict()
+
+                pool_section = DiagnosisSection("format_structure_pool", "格式结构规则池")
+                for mr in pool_result.method_results:
+                    pool_section.add_metric(
+                        f"{mr.method_name}_success", mr.success
+                    )
+                    if not mr.success:
+                        self.issues.append({
+                            "type": "format_structure_violation",
+                            "rule": mr.method_name,
+                            "error": mr.error_message,
+                            "suggestion": f"格式结构规则 '{mr.method_name}' 校验失败",
+                        })
+
+                self.report.add_section(pool_section)
+            except Exception as e:
+                result["format_structure_pool"] = {"error": str(e)}
+
+            if progress_callback:
+                progress_callback('format_structure_pool', 1.0)
+
         # 汇总指标
         basic_metrics = result["basic_quality"]["metrics"] if result["basic_quality"] else {}
         self.metrics = {
@@ -1275,8 +1599,10 @@ class ImageDetector(BaseDetector):
         支持的输入格式：
             - List[bytes]: 原始图像字节数据
             - List[np.ndarray]: numpy 数组（转为 PNG bytes）
+            - List[io.BytesIO]: BytesIO 对象（提取 bytes）
             - 单个 bytes: 包装为列表
             - 单个 np.ndarray: 包装为列表
+            - 单个 io.BytesIO: 包装为列表
 
         Parameters
         ----------
@@ -1292,6 +1618,8 @@ class ImageDetector(BaseDetector):
             return [data]
         elif isinstance(data, np.ndarray):
             return [self._array_to_bytes(data)]
+        elif isinstance(data, io.BytesIO):
+            return [data.getvalue()]
         elif isinstance(data, list):
             result = []
             for item in data:
@@ -1299,6 +1627,8 @@ class ImageDetector(BaseDetector):
                     result.append(item)
                 elif isinstance(item, np.ndarray):
                     result.append(self._array_to_bytes(item))
+                elif isinstance(item, io.BytesIO):
+                    result.append(item.getvalue())
                 else:
                     result.append(item)
             return result

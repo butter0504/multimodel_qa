@@ -1,10 +1,11 @@
-from typing import List, Optional
+from typing import Optional
 
 from fastapi import APIRouter, UploadFile, File, Form
 
-from modules.text_detector import TextDetector
+from modules.interface import Interface, DetectionRequest
 
 router = APIRouter()
+_interface = Interface()
 
 
 @router.post("/detect")
@@ -12,37 +13,93 @@ async def detect_text(
     file: UploadFile = File(...),
     labels: Optional[str] = Form(None),
     modules: Optional[str] = Form(None),
+    format_hint: Optional[str] = Form(None),
+    label_column: Optional[str] = Form(None),
+    text_column: Optional[str] = Form(None),
 ):
-    """
-    检测文本数据质量
-
-    Parameters
-    ----------
-    file : UploadFile
-        文本文件（TXT 或 CSV）
-    labels : Optional[str]
-        标签列表，以逗号分隔。如 "positive,negative,positive,..."
-    modules : Optional[str]
-        检测模块列表，以逗号分隔。可选值：
-        text_length, duplicate, label_error, character_anomaly,
-        language, perplexity, sentiment_consistency
-        默认为 "text_length,duplicate,character_anomaly"
-    """
     contents = await file.read()
-    texts = contents.decode("utf-8").splitlines()
-    texts = [t for t in texts if t.strip() != ""]
 
     label_list = None
     if labels:
         label_list = [l.strip() for l in labels.split(",") if l.strip()]
-        if len(label_list) != len(texts):
-            label_list = None
 
     module_list = None
     if modules:
         module_list = [m.strip() for m in modules.split(",") if m.strip()]
 
-    detector = TextDetector()
-    result = detector.detect(texts, labels=label_list, modules=module_list)
+    request = DetectionRequest(
+        source=contents,
+        source_type="bytes",
+        modality="text",
+        modules=module_list or ["text_length", "duplicate", "character_anomaly"],
+        format_hint=format_hint,
+        label_column=label_column,
+        text_column=text_column,
+        extra={"filename": file.filename, "labels": label_list},
+    )
+
+    response = _interface.process_request(request)
+
+    result = {
+        "success": response.success,
+        "data_info": response.data_object_info,
+        "detection": response.detection_result,
+    }
+    if response.errors:
+        result["errors"] = response.errors
+    if response.warnings:
+        result["warnings"] = response.warnings
 
     return result
+
+
+@router.post("/detect/file")
+async def detect_text_file(
+    file: UploadFile = File(...),
+    modules: Optional[str] = Form(None),
+    format_hint: Optional[str] = Form(None),
+    label_column: Optional[str] = Form(None),
+    text_column: Optional[str] = Form(None),
+):
+    import tempfile
+    import os
+
+    contents = await file.read()
+    suffix = os.path.splitext(file.filename)[1] if file.filename else ""
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
+        f.write(contents)
+        tmp_path = f.name
+
+    try:
+        module_list = None
+        if modules:
+            module_list = [m.strip() for m in modules.split(",") if m.strip()]
+
+        request = DetectionRequest(
+            source=tmp_path,
+            source_type="path",
+            modality="text",
+            modules=module_list or ["text_length", "duplicate", "character_anomaly"],
+            format_hint=format_hint,
+            label_column=label_column,
+            text_column=text_column,
+        )
+
+        response = _interface.process_request(request)
+
+        result = {
+            "success": response.success,
+            "data_info": response.data_object_info,
+            "detection": response.detection_result,
+        }
+        if response.errors:
+            result["errors"] = response.errors
+        if response.warnings:
+            result["warnings"] = response.warnings
+
+        return result
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass

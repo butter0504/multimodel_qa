@@ -1,191 +1,63 @@
 import streamlit as st
-import pandas as pd
-import plotly.express as px
-import requests
-import json
-import time
-from modules.table_detector import TableDetector
-
-st.markdown("""
-<style>
-[data-testid="stSidebarNav"] {
-    display: none;
-}
-
-:root {
-    --primary-color: #1E3A8A;
-    --primary-light: #4F46E5;
-    --success-color: #10B981;
-    --warning-color: #F59E0B;
-    --error-color: #EF4444;
-    --text-primary: #1F2937;
-    --text-secondary: #6B7280;
-    --bg-light: #F3F4F6;
-    --bg-white: #FFFFFF;
-    --border-color: #E5E7EB;
-}
-
-body {
-    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-    color: var(--text-primary);
-    line-height: 1.6;
-    background-color: var(--bg-light);
-}
-
-.page-title {
-    font-size: 2rem;
-    font-weight: 700;
-    background: linear-gradient(135deg, var(--primary-color), var(--primary-light));
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-    margin-bottom: 1.5rem;
-}
-
-.card {
-    background: var(--bg-white);
-    border-radius: 12px;
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
-    padding: 20px;
-    margin-bottom: 20px;
-    border: 1px solid var(--border-color);
-    transition: all 0.3s ease;
-}
-
-.card:hover {
-    transform: translateY(-2px);
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
-}
-
-.stButton > button {
-    background: linear-gradient(135deg, var(--primary-color), var(--primary-light));
-    color: white;
-    border: none;
-    border-radius: 8px;
-    padding: 8px 16px;
-    font-weight: 600;
-    transition: all 0.3s ease;
-}
-
-.stButton > button:hover {
-    transform: translateY(-1px);
-    box-shadow: 0 4px 8px rgba(30, 58, 138, 0.3);
-}
-
-.metric-card {
-    background: var(--bg-light);
-    border-radius: 8px;
-    padding: 15px;
-    text-align: center;
-    border-left: 4px solid var(--primary-color);
-}
-
-.metric-card.success {
-    border-left-color: var(--success-color);
-}
-
-.metric-card.warning {
-    border-left-color: var(--warning-color);
-}
-
-.metric-card.error {
-    border-left-color: var(--error-color);
-}
-
-.upload-area {
-    border: 2px dashed var(--border-color);
-    border-radius: 12px;
-    padding: 30px;
-    text-align: center;
-    transition: all 0.3s ease;
-    background: var(--bg-white);
-}
-
-.upload-area:hover {
-    border-color: var(--primary-light);
-    background: rgba(79, 70, 229, 0.02);
-}
-</style>
-""", unsafe_allow_html=True)
-
-if "page" not in st.session_state:
-    st.session_state.page = "表格分析"
-
-if "recent_analyses" not in st.session_state:
-    st.session_state.recent_analyses = []
-
-if "projects" not in st.session_state:
-    st.session_state.projects = []
-
-# 侧边栏 - 只保留返回首页按钮
-with st.sidebar:
-    if st.button("返回首页", width='stretch'):
-        st.session_state.page = "首页"
-        st.session_state.current_project = None
-        st.switch_page("main.py")
-
-# 页面标题
-st.markdown('<h1 class="page-title">表格数据质量分析</h1>', unsafe_allow_html=True)
-
-# 文件上传区域
-st.markdown('<div class="upload-area">', unsafe_allow_html=True)
-uploaded_file = st.file_uploader(
-    "拖拽文件到此处或点击上传 CSV/Excel 文件",
-    type=["csv", "xlsx"],
-    accept_multiple_files=False,
-    help="支持 CSV 和 Excel 文件格式"
+from app.utils.common import (
+    inject_css, render_sidebar, run_detection,
+    get_module_options, get_default_modules, get_format_options,
 )
-st.markdown('</div>', unsafe_allow_html=True)
 
-# 标签列输入
-label_col = st.text_input("标签列名称（可选）", placeholder="例如：label")
+st.set_page_config(page_title="表格分析", layout="wide")
+inject_css()
+render_sidebar()
 
-# 项目名称
-project_name = st.text_input("项目名称", placeholder="输入项目名称")
+st.markdown("## 📊 表格数据质量分析")
 
-# 开始分析按钮
-if uploaded_file and project_name:
-    if st.button("开始分析", width='stretch'):
-        with st.spinner("正在分析数据..."):
-            if uploaded_file.name.endswith('.csv'):
-                df = pd.read_csv(uploaded_file)
-            else:
-                df = pd.read_excel(uploaded_file)
-            
-            detector = TableDetector()
-            result = detector.detect(df, label_col=label_col if label_col else None)
-            
-            current_time = time.strftime("%Y-%m-%d %H:%M:%S")
-            
-            analysis_record = {
-                "name": project_name,
-                "type": "表格",
-                "file": uploaded_file.name,
-                "time": current_time,
-                "results": result,
-                "file_object": uploaded_file,
-                "label_col": label_col
-            }
-            
-            if "analysis_history" not in st.session_state:
-                st.session_state.analysis_history = []
-            st.session_state.analysis_history.append(analysis_record)
-            
-            if "recent_analyses" not in st.session_state:
-                st.session_state.recent_analyses = []
-            st.session_state.recent_analyses.append(analysis_record)
-            
-            if len(st.session_state.recent_analyses) > 5:
-                st.session_state.recent_analyses = st.session_state.recent_analyses[-5:]
-            
-            st.session_state.analysis_result = result
-            st.session_state.uploaded_file = uploaded_file
+uploaded_file = st.file_uploader("上传表格文件", type=["csv", "xlsx", "tsv"])
+label_col = st.text_input("标签列名称（可选）", value="")
+text_col = st.text_input("文本列名称（可选）", value="")
+project_name = st.text_input("项目名称", value="表格分析项目")
+
+format_options = get_format_options()
+format_label = st.selectbox("数据格式", list(format_options.keys()), key="table_format")
+format_hint = format_options[format_label]
+
+module_opts = get_module_options("table")
+selected_modules = []
+st.markdown("### 检测模块")
+cols = st.columns(2)
+for i, (key, desc) in enumerate(module_opts.items()):
+    with cols[i % 2]:
+        default = key in get_default_modules("table")
+        if st.checkbox(desc, value=default, key=f"tbl_{key}"):
+            selected_modules.append(key)
+
+if st.button("🚀 开始分析", use_container_width=True, type="primary"):
+    if uploaded_file is None:
+        st.error("请先上传文件")
+    else:
+        with st.spinner("正在分析..."):
+            file_bytes = uploaded_file.read()
+            response = run_detection(
+                source=file_bytes,
+                modality="table",
+                modules=selected_modules if selected_modules else None,
+                format_hint=format_hint or "csv",
+                label_column=label_col if label_col else None,
+                text_column=text_col if text_col else None,
+                project_name=project_name,
+                filename=uploaded_file.name,
+                extra={"filename": uploaded_file.name},
+            )
+            st.session_state.analysis_result = response.detection_result
+            st.session_state.analysis_modality = "table"
+            st.session_state.uploaded_file_name = uploaded_file.name
             st.session_state.label_col = label_col
-            
-            st.switch_page("pages/05_表格分析详情.py")
 
-# 页脚
-st.markdown("""
-<div style="margin-top: 50px; text-align: center; color: var(--text-secondary); padding: 2rem 0;">
-    <p>© 2026 多模态数据质量检测系统 | 基于 Cleanlab 置信学习</p>
-</div>
-""", unsafe_allow_html=True)
+            if response.success:
+                st.session_state.data_object_info = response.data_object_info
+                if response.warnings:
+                    for w in response.warnings:
+                        st.warning(w)
+                st.success("分析完成！")
+                st.switch_page("pages/05_表格分析详情.py")
+            else:
+                for e in response.errors:
+                    st.error(e)
